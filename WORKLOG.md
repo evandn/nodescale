@@ -61,3 +61,4 @@ response and exits.
 - Items 1-5 done: gate one-shot, nonce files, extended ops, policy, stacks; tests incl. real-docker stack lifecycle pass.
 - Items 6-7 done: TS ops synced + vectors regenerated; relay dev mode = RELAY_DEV_GATE binary.
 - Item 8 done: install/upgrade/uninstall generator, release workflow, test/integration/server-install.sh passes on Ubuntu 24.04 (setgid gate via su). Fixed: root check must use real uid; dir setgid via os.ModeSetgid.
+- 9a/9b done: sealed env values (X25519+HKDF+AES-GCM) gate<->browser, containers.env returns sealed reply, HMAC spec hash; cross-language vectors.

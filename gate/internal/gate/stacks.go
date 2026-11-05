@@ -2,8 +2,6 @@ package gate
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -78,6 +76,9 @@ func (g *Gate) deployStack(ctx context.Context, st StackSpec) ([]StackResult, er
 			s.Restart = "unless-stopped"
 		}
 		s.Start = true
+		if err := g.unsealEnv(s.Env); err != nil {
+			return nil, fmt.Errorf("service %s: %w", s.Service, err)
+		}
 		// Validate everything before changing anything on the host.
 		if err := s.validate(pol); err != nil {
 			return nil, fmt.Errorf("service %s: %w", s.Service, err)
@@ -120,7 +121,7 @@ func (g *Gate) deployStack(ctx context.Context, st StackSpec) ([]StackResult, er
 		if err != nil {
 			return results, fmt.Errorf("service %s: %w", s.Service, err)
 		}
-		hash := specHash(s, imageID)
+		hash := g.specHash(s, imageID)
 		cur, exists := byService[s.Service]
 		if exists && cur.Labels[LabelHash] == hash && cur.State == "running" {
 			results = append(results, StackResult{Service: s.Service, Action: "unchanged", ID: cur.ID})
@@ -204,13 +205,12 @@ func (g *Gate) removeStack(ctx context.Context, name string, volumes bool) ([]St
 // specHash identifies a service definition together with the exact image,
 // so redeploying an unchanged stack leaves running containers alone while a
 // new image or config recreates them.
-func specHash(s *ServiceSpec, imageID string) string {
+func (g *Gate) specHash(s *ServiceSpec, imageID string) string {
 	b, _ := json.Marshal(struct {
 		S  ContainerSpec
 		ID string
 	}{s.ContainerSpec, imageID})
-	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:12])
+	return g.specMAC(b)
 }
 
 func appendUnique(list []string, v string) []string {

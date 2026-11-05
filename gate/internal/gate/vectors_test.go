@@ -2,6 +2,7 @@ package gate
 
 import (
 	"context"
+	"crypto/ecdh"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -17,8 +18,14 @@ type tsVectors struct {
 	Now       int64  `json:"now"`
 	AgentSeed string `json:"agentSeed"`
 	AgentID   string `json:"agentId"`
-	Signer    Signer `json:"signer"`
-	Requests  []struct {
+	SealKey   string `json:"sealKey"`
+	Sealed    struct {
+		Label     string `json:"label"`
+		Plaintext string `json:"plaintext"`
+		Value     string `json:"value"`
+	} `json:"sealed"`
+	Signer   Signer `json:"signer"`
+	Requests []struct {
 		Name    string          `json:"name"`
 		Request json.RawMessage `json:"request"`
 	} `json:"requests"`
@@ -49,6 +56,12 @@ func TestTypeScriptVectors(t *testing.T) {
 	if a.ID() != v.AgentID {
 		t.Fatalf("agent id derivation differs: go=%s ts=%s", a.ID(), v.AgentID)
 	}
+	if protocol.B64(a.SealPublicKey()) != v.SealKey {
+		t.Fatalf("seal key derivation differs: go=%s ts=%s", protocol.B64(a.SealPublicKey()), v.SealKey)
+	}
+	if pt, err := a.unseal(v.Sealed.Value, v.Sealed.Label); err != nil || pt != v.Sealed.Plaintext {
+		t.Fatalf("TypeScript-sealed value: %q %v", pt, err)
+	}
 
 	type vectorOut struct {
 		Name     string                  `json:"name"`
@@ -71,9 +84,22 @@ func TestTypeScriptVectors(t *testing.T) {
 		outs = append(outs, vectorOut{Name: r.Name, Payload: req.Payload, Response: sr})
 	}
 
+	// A reply sealed here to a fixed browser key, opened by packages/protocol/test.
+	browserSeed := make([]byte, 32)
+	for i := range browserSeed {
+		browserSeed[i] = byte(i + 1)
+	}
+	browser, _ := ecdh.X25519().NewPrivateKey(browserSeed)
+	reply, err := a.sealTo(browser.PublicKey().Bytes(), []byte(`["A=1","B=two"]`), "containers.env")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// Responses signed here are verified by packages/protocol/test.
 	if os.Getenv("UPDATE_VECTORS") != "" {
-		ob, _ := json.MarshalIndent(map[string]any{"agentId": a.ID(), "vectors": outs}, "", "  ")
+		ob, _ := json.MarshalIndent(map[string]any{"agentId": a.ID(), "vectors": outs, "reply": map[string]string{
+			"privateKey": protocol.B64(browserSeed), "publicKey": protocol.B64(browser.PublicKey().Bytes()), "sealed": reply, "plaintext": `["A=1","B=two"]`,
+		}}, "", "  ")
 		if err := os.WriteFile("../../../packages/protocol/test/go-vectors.json", append(ob, '\n'), 0o644); err != nil {
 			t.Fatal(err)
 		}

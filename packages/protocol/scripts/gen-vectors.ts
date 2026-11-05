@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { b64, concat, sha256, utf8, unb64 } from "../src/encoding.ts";
 import { challenge, encodeRequest, encodeSessionCert, agentIdFromKey, signWithSession } from "../src/crypto.ts";
 import { DOMAIN, type Assertion, type SignedRequest } from "../src/types.ts";
+import { seal } from "../src/seal.ts";
 
 const RP_ID = "nodescale.example.com";
 const ORIGIN = "https://nodescale.example.com";
@@ -58,12 +59,21 @@ const certPayload = encodeSessionCert({
 const certificate = { payload: b64(certPayload), assertion: await assertion(passkey.privateKey, credId, await challenge(DOMAIN.session, certPayload)) };
 requests.push({ name: "session", request: await signWithSession(sessionKey.privateKey, certificate, encodeRequest(agentId, "agent.info", {}, 60, NOW)) });
 
+// The gate's seal key is X25519(HKDF-SHA256(seed, info "nodescale/v1/x25519")).
+const ikm = await crypto.subtle.importKey("raw", seed, "HKDF", false, ["deriveBits"]);
+const xPriv = new Uint8Array(await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(), info: utf8("nodescale/v1/x25519") }, ikm, 256));
+const xKey = await crypto.subtle.importKey("pkcs8", concat(unb64("MC4CAQAwBQYDK2VuBCIEIA"), xPriv), { name: "X25519" }, true, ["deriveBits"]);
+const sealKey = (await crypto.subtle.exportKey("jwk", xKey)).x!;
+const sealed = { label: "DB_PASSWORD", plaintext: "correct horse=battery", value: await seal(sealKey, agentId, "correct horse=battery", "DB_PASSWORD") };
+
 const out = {
   rpId: RP_ID,
   origin: ORIGIN,
   now: NOW,
   agentSeed: b64(seed),
   agentId,
+  sealKey,
+  sealed,
   signer: { id: b64(credId), alg: -7, publicKey: spki, role: "admin", label: "ts-vector" },
   requests,
 };

@@ -8,6 +8,9 @@ import {
   challenge,
   concat,
   derToRaw,
+  openSealed,
+  replyKeyPair,
+  sealEnv,
   sessionCanSign,
   sha256,
   unb64,
@@ -20,7 +23,26 @@ import {
 const goVectors = JSON.parse(readFileSync(new URL("./go-vectors.json", import.meta.url), "utf8")) as {
   agentId: string;
   vectors: { name: string; requestPayload: string; response: SignedResponse }[];
+  reply: { privateKey: string; publicKey: string; sealed: string; plaintext: string };
 };
+
+describe("sealed values", () => {
+  it("opens a reply sealed by the Go gate", async () => {
+    const r = goVectors.reply;
+    const priv = await crypto.subtle.importKey("pkcs8", concat(unb64("MC4CAQAwBQYDK2VuBCIEIA"), unb64(r.privateKey)), { name: "X25519" }, false, ["deriveBits"]);
+    expect(await openSealed(priv, r.publicKey, goVectors.agentId, r.sealed, "containers.env")).toBe(r.plaintext);
+    await expect(openSealed(priv, r.publicKey, goVectors.agentId, r.sealed, "other-label")).rejects.toThrow();
+  });
+
+  it("round-trips and seals env values only", async () => {
+    const server = await replyKeyPair();
+    const [plain, empty, secret] = await sealEnv(server.publicKey, "ag_x", ["A", "B=", "C=v=1"]);
+    expect(plain).toBe("A");
+    expect(empty).toBe("B=");
+    expect(secret!.startsWith("C=nsseal1.")).toBe(true);
+    expect(await openSealed(server.privateKey, server.publicKey, "ag_x", secret!.slice(2), "C")).toBe("v=1");
+  });
+});
 
 describe("agent responses (signed by the Go agent)", () => {
   it("verify and bind to the request", async () => {

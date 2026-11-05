@@ -51,6 +51,11 @@ type updateArgs struct {
 	CPUs    float64 `json:"cpus,omitempty"`
 }
 
+type envArgs struct {
+	ID       string `json:"id"`
+	ReplyKey string `json:"replyKey"`
+}
+
 type execArgs struct {
 	ID         string   `json:"id"`
 	Cmd        []string `json:"cmd"`
@@ -126,15 +131,15 @@ func (g *Gate) dispatch(ctx context.Context, v *Verified) (any, error) {
 	case "agent.hello":
 		host, _ := os.Hostname()
 		return map[string]any{
-			"agent": g.id, "publicKey": protocol.B64(g.pub), "version": Version,
-			"hostname": host, "rpId": g.cfg.RPID, "origins": g.cfg.Origins,
+			"agent": g.id, "publicKey": protocol.B64(g.pub), "sealKey": protocol.B64(g.SealPublicKey()),
+			"version": Version, "hostname": host, "rpId": g.cfg.RPID, "origins": g.cfg.Origins,
 		}, nil
 
 	case "agent.info":
 		host, _ := os.Hostname()
 		return map[string]any{
-			"agent": g.id, "publicKey": protocol.B64(g.pub), "version": Version,
-			"hostname": host, "rpId": g.cfg.RPID, "origins": g.cfg.Origins,
+			"agent": g.id, "publicKey": protocol.B64(g.pub), "sealKey": protocol.B64(g.SealPublicKey()),
+			"version": Version, "hostname": host, "rpId": g.cfg.RPID, "origins": g.cfg.Origins,
 			"signers": len(g.cfg.Signers), "policy": pol,
 		}, nil
 
@@ -217,7 +222,42 @@ func (g *Gate) dispatch(ctx context.Context, v *Verified) (any, error) {
 		}
 		return d.ListContainers(ctx, l.All)
 
-	case "containers.inspect", "containers.stats", "containers.top", "containers.env":
+	case "containers.env":
+		var r envArgs
+		if err := parseArgs(args, &r); err != nil {
+			return nil, err
+		}
+		if err := ref(r.ID); err != nil {
+			return nil, err
+		}
+		reply, err := protocol.UnB64(r.ReplyKey)
+		if err != nil || len(reply) != 32 {
+			return nil, protocol.Errorf(protocol.CodeBadRequest, "replyKey must be a base64url X25519 public key; environment values are only returned encrypted")
+		}
+		var doc struct {
+			ID     string `json:"Id"`
+			Config struct {
+				Env []string `json:"Env"`
+			} `json:"Config"`
+		}
+		raw, err := d.InspectContainer(ctx, r.ID)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			return nil, err
+		}
+		if doc.Config.Env == nil {
+			doc.Config.Env = []string{}
+		}
+		plain, _ := json.Marshal(doc.Config.Env)
+		sealed, err := g.sealTo(reply, plain, "containers.env")
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"id": doc.ID, "sealed": sealed}, nil
+
+	case "containers.inspect", "containers.stats", "containers.top":
 		var r idArgs
 		if err := parseArgs(args, &r); err != nil {
 			return nil, err
@@ -241,14 +281,8 @@ func (g *Gate) dispatch(ctx context.Context, v *Verified) (any, error) {
 		}
 		cfg, _ := doc["Config"].(map[string]any)
 		env, _ := cfg["Env"].([]any)
-		if v.Req.Op == "containers.env" {
-			if env == nil {
-				env = []any{}
-			}
-			return map[string]any{"id": doc["Id"], "env": env}, nil
-		}
 		// Environment values often hold secrets; reading them needs the admin
-		// operation containers.env.
+		// operation containers.env, which returns them encrypted to the browser.
 		if cfg != nil && env != nil {
 			cfg["Env"] = redactEnvList(env)
 		}
@@ -387,6 +421,9 @@ func (g *Gate) dispatch(ctx context.Context, v *Verified) (any, error) {
 		if r.Timeout <= 0 || r.Timeout > 600 {
 			r.Timeout = 60
 		}
+		if err := g.unsealEnv(r.Env); err != nil {
+			return nil, err
+		}
 		ectx, cancel := context.WithTimeout(ctx, time.Duration(r.Timeout)*time.Second)
 		defer cancel()
 		return d.Exec(ectx, r.ID, r.Cmd, r.User, r.WorkingDir, r.Env, 1<<20)
@@ -394,6 +431,9 @@ func (g *Gate) dispatch(ctx context.Context, v *Verified) (any, error) {
 	case "containers.create":
 		var s ContainerSpec
 		if err := parseArgs(args, &s); err != nil {
+			return nil, err
+		}
+		if err := g.unsealEnv(s.Env); err != nil {
 			return nil, err
 		}
 		if err := s.validate(pol.Containers); err != nil {

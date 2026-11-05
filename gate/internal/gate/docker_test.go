@@ -2,6 +2,8 @@ package gate
 
 import (
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -49,7 +51,7 @@ func TestStackLifecycle(t *testing.T) {
 		st := StackSpec{Name: name, Volumes: []string{name + "_data"}}
 		for _, s := range services {
 			st.Services = append(st.Services, ServiceSpec{Service: s, ContainerSpec: ContainerSpec{
-				Image: testImage(), Cmd: []string{"sleep", "300"}, Env: []string{"MODE=" + env},
+				Image: testImage(), Cmd: []string{"sleep", "300"}, StopTimeout: 1, Env: []string{"MODE=" + env, "SECRET=" + sealFor(t, g, "hunter2", "SECRET")},
 				Mounts: []Mount{{Type: "volume", Source: name + "_data", Target: "/data"}},
 			}})
 		}
@@ -86,11 +88,15 @@ func TestStackLifecycle(t *testing.T) {
 	}
 
 	// Services reach each other by name on the stack network, and exec works.
-	res, err := g.docker.Exec(ctx, name+"-web", []string{"sh", "-c", "echo $MODE; echo oops >&2; exit 3"}, "", "", nil, 1<<20)
+	res, err := g.docker.Exec(ctx, name+"-web", []string{"sh", "-c", "echo $MODE; echo $SECRET >&2; exit 3"}, "", "", nil, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.ExitCode != 3 || len(res.Output) != 2 || res.Output[0].Text != "b" {
+	lines := map[string]string{}
+	for _, l := range res.Output {
+		lines[l.Stream] = l.Text
+	}
+	if res.ExitCode != 3 || lines["stdout"] != "b" || lines["stderr"] != "hunter2" {
 		t.Fatalf("exec result: %+v", res)
 	}
 
@@ -103,13 +109,18 @@ func TestStackLifecycle(t *testing.T) {
 	if !strings.Contains(string(b), "MODE=[redacted]") {
 		t.Fatalf("inspect must redact env: %s", b)
 	}
-	envRes, err := g.dispatch(ctx, &Verified{Req: reqFor("containers.env", map[string]string{"id": name + "-web"})})
+	browser, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	envRes, err := g.dispatch(ctx, &Verified{Req: reqFor("containers.env", map[string]string{"id": name + "-web", "replyKey": protocol.B64(browser.PublicKey().Bytes())})})
 	if err != nil {
 		t.Fatal(err)
 	}
 	b, _ = json.Marshal(envRes)
-	if !strings.Contains(string(b), "MODE=b") {
-		t.Fatalf("containers.env should reveal env: %s", b)
+	if strings.Contains(string(b), "hunter2") {
+		t.Fatalf("containers.env must not return plaintext: %s", b)
+	}
+	plain := openFrom(t, g, browser, envRes.(map[string]any)["sealed"].(string), "containers.env")
+	if !strings.Contains(plain, "SECRET=hunter2") || !strings.Contains(plain, "MODE=b") {
+		t.Fatalf("revealed env = %s", plain)
 	}
 
 	r, err = g.removeStack(ctx, name, true)
