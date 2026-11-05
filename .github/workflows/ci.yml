@@ -50,6 +50,7 @@ jobs:
         with:
           go-version-file: relay/go.mod
       - run: go vet ./...
+      - run: go test ./...
       - run: go build ./...
 
   # Runs the generated install script on the runner and drives the installed
@@ -82,7 +83,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: npm install -g playwright@1 && npx playwright install --with-deps chromium
+      - run: npm install -g playwright@1 && playwright install --with-deps chromium
       - run: docker pull alpine:3.20 && docker pull nginx:alpine
       - run: mkdir -p e2e-out && sudo -E env "PATH=$PATH" NODE_PATH="$(npm root -g)" E2E_OUT="$PWD/e2e-out" sh test/e2e/run.sh
       - if: always()
