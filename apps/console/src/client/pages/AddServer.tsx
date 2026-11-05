@@ -66,9 +66,11 @@ export function AddServerPage() {
       }
 
       let tunnelToken: string | undefined;
+      let tunnelId: string | null = null;
       if (withTunnel) {
         const t = await cloudflare.createTunnel(n);
         tunnelToken = t.token ?? (await cloudflare.tunnelToken(t.id));
+        tunnelId = t.id;
         recordAudit("tunnel.create", true, t.name);
       }
 
@@ -79,6 +81,7 @@ export function AddServerPage() {
         tailnetIp: ip,
         tailnetName: device?.name ?? null,
         deviceId: device?.nodeId ?? device?.id ?? null,
+        tunnelId,
       });
       const server = await api.get<Server>(`/servers/${id}`);
       recordAudit("server.create", true, n, id);
@@ -184,7 +187,7 @@ export function AddServerPage() {
             <ol className="list-decimal space-y-2 pl-4 text-sm text-zinc-600 dark:text-zinc-400">
               <li>Your browser mints a one-hour, single-use Tailscale auth key{withTunnel ? " and creates a Cloudflare Tunnel" : ""}.</li>
               <li>You run the generated script once on the server as root.</li>
-              <li>You confirm the agent ID it prints. It is then pinned in your encrypted vault.</li>
+              <li>You confirm the server identity it prints. It is then pinned in your encrypted vault.</li>
             </ol>
             <Button variant="primary" className="mt-5 w-full" loading={busy} onClick={generate}>
               Generate install script

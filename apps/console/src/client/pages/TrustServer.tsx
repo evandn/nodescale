@@ -6,7 +6,7 @@ import { tailscale } from "../lib/providers.ts";
 import { ActionButton, Button, Callout, Card, Code } from "../components/ui.tsx";
 
 /**
- * Trust on first use: fetch the agent's self-certifying identity over the
+ * Trust on first use: fetch the server's self-certifying identity over the
  * relay, have the human compare it with what the install script printed on
  * the server, then pin it in the encrypted vault. From then on every
  * response must be signed by that key.
@@ -34,7 +34,7 @@ export function TrustServer({ server: initial, onDone }: { server: Server; onDon
   async function trust() {
     if (!found) return;
     await updateVault((d) => {
-      d.pins[server.id] = { agentId: found.agent, publicKey: found.publicKey, pinnedAt: Math.floor(Date.now() / 1000) };
+      d.pins[server.id] = { agentId: found.agent, publicKey: found.publicKey, sealKey: found.sealKey, pinnedAt: Math.floor(Date.now() / 1000) };
     });
     await api.patch(`/servers/${server.id}`, { agentId: found.agent, agentPublicKey: found.publicKey });
     recordAudit("server.trust", true, found.agent, server.id);
@@ -49,7 +49,7 @@ export function TrustServer({ server: initial, onDone }: { server: Server; onDon
     <Card title="Verify server identity">
       {!found ? (
         <div className="space-y-4">
-          <p className="text-sm text-zinc-600 dark:text-zinc-400">nodescale will find the server on your tailnet and ask its agent for its identity key.</p>
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">nodescale will find the server on your tailnet and ask its gate for its identity key.</p>
           <ActionButton variant="primary" action={locate}>
             Find server
           </ActionButton>
@@ -57,12 +57,12 @@ export function TrustServer({ server: initial, onDone }: { server: Server; onDon
       ) : (
         <div className="space-y-4">
           <p className="text-sm">
-            The agent on <strong>{found.hostname}</strong> (version {found.version}) reports this identity:
+            The gate on <strong>{found.hostname}</strong> (version {found.version}) reports this identity:
           </p>
           <p className="rounded-lg bg-zinc-100 px-4 py-3 font-mono text-sm dark:bg-zinc-800">{found.agent}</p>
           {!found.origins.includes(location.origin) && (
             <Callout tone="red">
-              This agent does not trust this console's origin (<Code>{location.origin}</Code>). It accepts: {found.origins.join(", ")}.
+              This server does not trust this console's origin (<Code>{location.origin}</Code>). It accepts: {found.origins.join(", ")}.
             </Callout>
           )}
           <Callout tone="blue">

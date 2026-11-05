@@ -17,7 +17,7 @@ export function AuditPage() {
       />
       <div className="mb-6">
         <Callout>
-          This log lives in the console and is only as trustworthy as the console. Each agent keeps its own append-only log of every verified request on the server, at <Code>/var/lib/nodescale/audit.jsonl</Code>. That is the authoritative record.
+          This log lives in the console and is only as trustworthy as the console. Each server's gate keeps its own log of authenticated requests at <Code>/var/lib/nodescale/audit.jsonl</Code> (Server → Audit). That is the authoritative record.
         </Callout>
       </div>
       <Card padded={false}>

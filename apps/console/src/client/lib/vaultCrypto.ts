@@ -28,6 +28,8 @@ export interface CloudflareCreds {
 export interface Pin {
   agentId: string;
   publicKey: string;
+  /** X25519 key that environment values are sealed to. */
+  sealKey: string;
   pinnedAt: number;
 }
 
@@ -41,6 +43,8 @@ export interface VaultData {
   pins: Record<string, Pin>;
   /** Trusted copy of my own passkey public keys, used for server bootstrap. */
   signers: SignerKey[];
+  /** Values for ${NAME} placeholders in stack definitions. */
+  secrets?: Record<string, string>;
 }
 
 export type WrappedKey =

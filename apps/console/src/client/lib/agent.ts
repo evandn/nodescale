@@ -4,14 +4,18 @@ import {
   challenge,
   encodeRequest,
   levelOf,
+  openSealed,
+  replyKeyPair,
+  sealEnv,
   sessionCanSign,
   signWithSession,
   verifyResponse,
   type Op,
   type SignedRequest,
 } from "@nodescale/protocol";
+import type { Pin } from "./vaultCrypto.ts";
 import { api, ApiError, type Server } from "./api.ts";
-import { app, renewSession, requireVault, sessionValid } from "./app.ts";
+import { app, renewSession as renew, requireVault, sessionValid } from "./app.ts";
 import { RELAY_TAG, tailscale } from "./providers.ts";
 import { getAssertion } from "./webauthn.ts";
 
@@ -61,6 +65,15 @@ async function rpc(server: Server, request: SignedRequest): Promise<unknown> {
   }
 }
 
+// One passkey prompt for any number of concurrent calls that need a session.
+let renewing: Promise<void> | null = null;
+function renewSession(): Promise<void> {
+  renewing ??= renew().finally(() => {
+    renewing = null;
+  });
+  return renewing;
+}
+
 // ---------------------------------------------------------------------------
 // Calls
 
@@ -80,6 +93,7 @@ export async function callAgent<R>(server: Server, op: Op, args?: unknown, opts:
   const pin = requireVault().pins[server.id];
   if (level !== "public" && !pin) throw new NotPinnedError();
   const aud = level === "public" ? "*" : pin!.agentId;
+  if (pin) args = await sealArgs(op, args, pin);
   const payload = encodeRequest(aud, op, args, opts.ttl ?? 60);
 
   let request: SignedRequest;
@@ -108,9 +122,36 @@ export async function callAgent<R>(server: Server, op: Op, args?: unknown, opts:
   return resp.result as R;
 }
 
+/**
+ * Encrypts every environment value to the server before signing, so the
+ * console and relay only ever carry ciphertext.
+ */
+async function sealArgs(op: Op, args: unknown, pin: Pin): Promise<unknown> {
+  const seal = (env?: string[]) => (env?.length ? sealEnv(pin.sealKey, pin.agentId, env) : Promise.resolve(env));
+  if (op === "containers.create" || op === "containers.exec") {
+    const a = args as { env?: string[] };
+    return { ...a, env: await seal(a.env) };
+  }
+  if (op === "stacks.deploy") {
+    const a = args as { services: { env?: string[] }[] };
+    return { ...a, services: await Promise.all(a.services.map(async (s) => ({ ...s, env: await seal(s.env) }))) };
+  }
+  return args;
+}
+
+/** Reveals a container's environment; the gate encrypts it to a key only this tab holds. */
+export async function revealEnv(server: Server, id: string): Promise<string[]> {
+  const pin = requireVault().pins[server.id];
+  if (!pin) throw new NotPinnedError();
+  const reply = await replyKeyPair();
+  const r = await callAgent<{ sealed: string }>(server, "containers.env", { id, replyKey: reply.publicKey });
+  return JSON.parse(await openSealed(reply.privateKey, reply.publicKey, pin.agentId, r.sealed, "containers.env")) as string[];
+}
+
 export interface Hello {
   agent: string;
   publicKey: string;
+  sealKey: string;
   version: string;
   hostname: string;
   rpId: string;

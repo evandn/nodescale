@@ -8,7 +8,7 @@ import { cloudflare, tailscale } from "../lib/providers.ts";
 import type { TailscaleCreds } from "../lib/vaultCrypto.ts";
 import { ActionButton, Badge, Button, Callout, Card, Code, CodeBlock, Field, Input, Modal, PageHeader, PlusIcon, Select, Tabs, confirmAction, toast } from "../components/ui.tsx";
 
-type Tab = "integrations" | "passkeys" | "security";
+type Tab = "integrations" | "secrets" | "passkeys" | "security";
 
 export function SettingsPage() {
   const [tab, setTab] = useState<Tab>("integrations");
@@ -20,11 +20,13 @@ export function SettingsPage() {
         onChange={setTab}
         tabs={[
           { id: "integrations", label: "Integrations" },
+          { id: "secrets", label: "Secrets" },
           { id: "passkeys", label: "Passkeys" },
           { id: "security", label: "Security" },
         ]}
       />
       {tab === "integrations" && <Integrations />}
+      {tab === "secrets" && <Secrets />}
       {tab === "passkeys" && <Passkeys />}
       {tab === "security" && <Security />}
     </>
@@ -297,3 +299,65 @@ function Security() {
     </div>
   );
 }
+
+function Secrets() {
+  const secrets = app.use((s) => (s.vault.status === "unlocked" ? s.vault.data.secrets : undefined)) ?? NO_SECRETS;
+  const [name, setName] = useState("");
+  const [value, setValue] = useState("");
+  const names = Object.keys(secrets).sort();
+  return (
+    <Card title="Stack secrets">
+      <p className="mb-4 text-sm text-zinc-600 dark:text-zinc-400">
+        Values for <Code>{"${NAME}"}</Code> placeholders in stack compose files. They live only in your encrypted vault and are sealed to the target server in your browser at deploy time; teammates keep their own copies.
+      </p>
+      {names.length > 0 && (
+        <ul className="mb-5 divide-y divide-zinc-100 rounded-lg ring-1 ring-zinc-200 dark:divide-zinc-800 dark:ring-zinc-800">
+          {names.map((n) => (
+            <li key={n} className="flex items-center justify-between px-3 py-2 text-sm">
+              <span className="font-mono">{n}</span>
+              <span className="flex items-center gap-3">
+                <span className="font-mono text-xs text-zinc-400">{"•".repeat(Math.min(12, secrets[n]!.length))}</span>
+                <ActionButton
+                  size="sm"
+                  variant="ghost"
+                  className="text-red-600 dark:text-red-400"
+                  action={() =>
+                    updateVault((d) => {
+                      delete d.secrets?.[n];
+                    })
+                  }
+                >
+                  Delete
+                </ActionButton>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <form className="flex items-end gap-2" onSubmit={(e) => e.preventDefault()}>
+        <Field label="Name">
+          <Input className="font-mono" value={name} onChange={(e) => setName(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "_"))} placeholder="DB_PASSWORD" />
+        </Field>
+        <Field label="Value">
+          <Input type="password" autoComplete="off" value={value} onChange={(e) => setValue(e.target.value)} />
+        </Field>
+        <ActionButton
+          variant="primary"
+          disabled={!/^[A-Z_][A-Z0-9_]*$/.test(name) || !value}
+          action={async () => {
+            await updateVault((d) => {
+              d.secrets = { ...(d.secrets ?? {}), [name]: value };
+            });
+            setName("");
+            setValue("");
+            toast("Secret saved to your vault", "success");
+          }}
+        >
+          Save
+        </ActionButton>
+      </form>
+    </Card>
+  );
+}
+
+const NO_SECRETS: Record<string, string> = {};

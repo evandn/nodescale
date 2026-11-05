@@ -1,14 +1,16 @@
 import { useState } from "react";
-import { recordAudit } from "../lib/api.ts";
+import { api, recordAudit, type Server } from "../lib/api.ts";
 import { app } from "../lib/app.ts";
 import { timeAgo, useAsync } from "../lib/hooks.ts";
 import { cloudflare, type IngressRule, type Tunnel } from "../lib/providers.ts";
+import { ensureRoute, removeRoute } from "../lib/routes.ts";
 import { navigate } from "../lib/router.tsx";
 import { ActionButton, Badge, Button, Callout, Card, Code, Empty, Field, Input, Modal, PageHeader, PlusIcon, RefreshIcon, Select, Spinner, confirmAction, toast } from "../components/ui.tsx";
 
 export function TunnelsPage() {
   const hasCf = app.use((s) => s.vault.status === "unlocked" && !!s.vault.data.cloudflare);
   const tunnels = useAsync(async () => (hasCf ? cloudflare.listTunnels() : []), [hasCf]);
+  const servers = useAsync(() => api.get<Server[]>("/servers"));
 
   if (!hasCf) {
     return (
@@ -45,7 +47,7 @@ export function TunnelsPage() {
       ) : (
         <div className="space-y-6">
           {tunnels.data.map((t) => (
-            <TunnelCard key={t.id} tunnel={t} onChanged={() => void tunnels.reload()} />
+            <TunnelCard key={t.id} tunnel={t} server={servers.data?.find((s) => s.tunnelId === t.id)} onChanged={() => void tunnels.reload()} />
           ))}
         </div>
       )}
@@ -53,22 +55,14 @@ export function TunnelsPage() {
   );
 }
 
-function TunnelCard({ tunnel, onChanged }: { tunnel: Tunnel; onChanged: () => void }) {
+function TunnelCard({ tunnel, server, onChanged }: { tunnel: Tunnel; server?: Server; onChanged: () => void }) {
   const ingress = useAsync(() => cloudflare.getIngress(tunnel.id), [tunnel.id]);
   const [adding, setAdding] = useState(false);
   const routes = (ingress.data ?? []).filter((r) => r.hostname);
 
-  async function removeRoute(rule: IngressRule) {
+  async function remove(rule: IngressRule) {
     if (!(await confirmAction({ title: `Remove ${rule.hostname}?`, body: "The hostname stops routing to this tunnel and its DNS record is deleted.", confirm: "Remove", danger: true }))) return;
-    await cloudflare.putIngress(tunnel.id, routes.filter((r) => r !== rule));
-    const zones = await cloudflare.listZones();
-    const zone = zones.find((z) => rule.hostname === z.name || rule.hostname!.endsWith("." + z.name));
-    if (zone) {
-      for (const rec of await cloudflare.findDns(zone.id, rule.hostname!)) {
-        if (rec.type === "CNAME" && rec.content === `${tunnel.id}.cfargotunnel.com`) await cloudflare.deleteDns(zone.id, rec.id);
-      }
-    }
-    recordAudit("tunnel.route.remove", true, `${rule.hostname} → ${tunnel.name}`);
+    await removeRoute(tunnel.id, tunnel.name, rule.hostname!);
     toast("Route removed", "success");
     await ingress.reload();
   }
@@ -80,6 +74,7 @@ function TunnelCard({ tunnel, onChanged }: { tunnel: Tunnel; onChanged: () => vo
         <span className="flex items-center gap-2">
           {tunnel.name}
           <Badge tone={tunnel.status === "healthy" ? "green" : tunnel.status === "degraded" ? "yellow" : tunnel.status === "down" ? "red" : "gray"}>{tunnel.status}</Badge>
+          {server && <Badge tone="blue">{server.name}</Badge>}
           <span className="text-xs font-normal text-zinc-500">
             {tunnel.connections.length} connection{tunnel.connections.length === 1 ? "" : "s"}
             {tunnel.connections[0] && ` · ${[...new Set(tunnel.connections.map((c) => c.colo_name))].join(", ")}`}
@@ -125,7 +120,7 @@ function TunnelCard({ tunnel, onChanged }: { tunnel: Tunnel; onChanged: () => vo
                 <span className="mx-2 text-zinc-400">→</span>
                 <Code>{r.service}</Code>
               </span>
-              <ActionButton size="sm" variant="ghost" action={() => removeRoute(r)}>
+              <ActionButton size="sm" variant="ghost" action={() => remove(r)}>
                 Remove
               </ActionButton>
             </li>
@@ -135,14 +130,8 @@ function TunnelCard({ tunnel, onChanged }: { tunnel: Tunnel; onChanged: () => vo
       <AddRouteModal
         open={adding}
         onClose={() => setAdding(false)}
-        onAdd={async (hostname, service, zoneId) => {
-          await cloudflare.putIngress(tunnel.id, [...routes.filter((r) => r.hostname !== hostname), { hostname, service }]);
-          const existing = await cloudflare.findDns(zoneId, hostname);
-          if (!existing.some((r) => r.type === "CNAME" && r.content === `${tunnel.id}.cfargotunnel.com`)) {
-            if (existing.length) throw new Error(`${hostname} already has a DNS record pointing elsewhere; remove it first.`);
-            await cloudflare.createTunnelCname(zoneId, hostname, tunnel.id);
-          }
-          recordAudit("tunnel.route.add", true, `${hostname} → ${service} (${tunnel.name})`);
+        onAdd={async (hostname, service) => {
+          await ensureRoute(tunnel.id, tunnel.name, hostname, service);
           toast(`${hostname} is live`, "success");
           setAdding(false);
           await ingress.reload();
@@ -152,7 +141,7 @@ function TunnelCard({ tunnel, onChanged }: { tunnel: Tunnel; onChanged: () => vo
   );
 }
 
-function AddRouteModal({ open, onClose, onAdd }: { open: boolean; onClose: () => void; onAdd: (hostname: string, service: string, zoneId: string) => Promise<void> }) {
+function AddRouteModal({ open, onClose, onAdd }: { open: boolean; onClose: () => void; onAdd: (hostname: string, service: string) => Promise<void> }) {
   const zones = useAsync(async () => (open ? cloudflare.listZones() : []), [open]);
   const [sub, setSub] = useState("");
   const [zoneId, setZoneId] = useState("");
@@ -167,7 +156,7 @@ function AddRouteModal({ open, onClose, onAdd }: { open: boolean; onClose: () =>
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <ActionButton variant="primary" disabled={!zone || !/^(https?|tcp|ssh):\/\/.+/.test(service)} action={() => onAdd(hostname, service, zone!.id)}>
+          <ActionButton variant="primary" disabled={!zone || !/^(https?|tcp|ssh):\/\/.+/.test(service)} action={() => onAdd(hostname, service)}>
             Add route
           </ActionButton>
         </>

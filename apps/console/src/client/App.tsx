@@ -6,7 +6,7 @@ import { Link, matchPath, navigate, useLocation } from "./lib/router.tsx";
 import { webauthnSupported } from "./lib/webauthn.ts";
 import { AuditPage } from "./pages/Audit.tsx";
 import { AddServerPage } from "./pages/AddServer.tsx";
-import { ServerPage } from "./pages/Server.tsx";
+import { ServerPage } from "./pages/server/index.tsx";
 import { ServersPage } from "./pages/Servers.tsx";
 import { SettingsPage } from "./pages/Settings.tsx";
 import { TeamPage } from "./pages/Team.tsx";

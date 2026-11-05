@@ -1,28 +1,35 @@
 import { api, type Server } from "../lib/api.ts";
+import { callAgent } from "../lib/agent.ts";
 import { app } from "../lib/app.ts";
-import { timeAgo, useAsync } from "../lib/hooks.ts";
+import { bytes, timeAgo, useAsync } from "../lib/hooks.ts";
 import { Link, navigate } from "../lib/router.tsx";
-import { Badge, Button, Card, Empty, PageHeader, PlusIcon, ShieldIcon, Spinner, Table, Td } from "../components/ui.tsx";
+import { Badge, Button, Empty, PageHeader, PlusIcon, RefreshIcon, ServerIcon, ShieldIcon, Spinner } from "../components/ui.tsx";
+import { Meter, uptime, type Container, type HostInfo } from "./server/shared.tsx";
 
 const NO_PINS = {} as Record<string, { agentId: string }>;
 
 export function ServersPage() {
   const me = app.use((s) => s.me)!;
   const pins = app.use((s) => (s.vault.status === "unlocked" ? s.vault.data.pins : NO_PINS));
-  const { data, loading, error } = useAsync(() => api.get<Server[]>("/servers"));
+  const { data, loading, error, reload } = useAsync(() => api.get<Server[]>("/servers"));
   const canManage = me.workspace.role !== "member";
 
   return (
     <>
       <PageHeader
         title="Servers"
-        description="Every action on a server is signed by your passkey and verified by the agent on that server, not by this console."
+        description="Every action on a server is signed by your passkey and verified by that server itself, not by this console."
         actions={
-          canManage && (
-            <Button variant="primary" onClick={() => navigate("/servers/new")}>
-              <PlusIcon /> Add server
+          <>
+            <Button variant="ghost" onClick={() => void reload()}>
+              <RefreshIcon /> Refresh
             </Button>
-          )
+            {canManage && (
+              <Button variant="primary" onClick={() => navigate("/servers/new")}>
+                <PlusIcon /> Add server
+              </Button>
+            )}
+          </>
         }
       />
       {loading && !data ? (
@@ -40,43 +47,81 @@ export function ServersPage() {
             )
           }
         >
-          Add a new Debian/Ubuntu machine or adopt one already on your tailnet. nodescale generates a one-time bootstrap script for it.
+          Add a new Debian/Ubuntu machine or adopt one already on your tailnet. nodescale generates a one-time bootstrap script; nothing runs in the background on the server.
         </Empty>
       ) : (
-        <Card padded={false}>
-          <Table head={["Name", "Tailnet", "Identity", "Provider", "Last seen"]}>
-            {data.map((s) => {
-              const pin = pins[s.id];
-              const mismatch = pin && s.agentId && pin.agentId !== s.agentId;
-              return (
-                <tr key={s.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/40">
-                  <Td>
-                    <Link to={`/servers/${s.id}`} className="font-medium text-zinc-900 hover:text-indigo-600 dark:text-zinc-100">
-                      {s.name}
-                    </Link>
-                  </Td>
-                  <Td className="font-mono text-xs">{s.tailnetIp ?? <span className="text-zinc-400">—</span>}</Td>
-                  <Td>
-                    {mismatch ? (
-                      <Badge tone="red">identity changed</Badge>
-                    ) : pin ? (
-                      <Badge tone="green">
-                        <ShieldIcon className="size-3" /> verified
-                      </Badge>
-                    ) : s.agentId ? (
-                      <Badge tone="yellow">not verified by you</Badge>
-                    ) : (
-                      <Badge>pending setup</Badge>
-                    )}
-                  </Td>
-                  <Td>{s.provider ?? <span className="text-zinc-400">—</span>}</Td>
-                  <Td className="text-zinc-500">{timeAgo(s.lastSeenAt)}</Td>
-                </tr>
-              );
-            })}
-          </Table>
-        </Card>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {data.map((s) => (
+            <ServerCard key={s.id} server={s} pinned={!!pins[s.id]} mismatch={!!pins[s.id] && !!s.agentId && pins[s.id]!.agentId !== s.agentId} />
+          ))}
+        </div>
       )}
     </>
+  );
+}
+
+function ServerCard({ server, pinned, mismatch }: { server: Server; pinned: boolean; mismatch: boolean }) {
+  const live = useAsync(async () => {
+    if (!pinned) return null;
+    const [host, containers] = await Promise.all([callAgent<HostInfo>(server, "host.info"), callAgent<Container[]>(server, "containers.list", { all: true })]);
+    return { host, containers };
+  }, [server.id, pinned]);
+
+  const h = live.data?.host;
+  const running = live.data?.containers.filter((c) => c.state === "running").length ?? 0;
+  const total = live.data?.containers.length ?? 0;
+  const unhealthy = live.data?.containers.filter((c) => c.state !== "running" && c.labels?.["io.nodescale.stack"]).length ?? 0;
+  const disk = h?.disks[h.disks.length - 1];
+
+  return (
+    <Link
+      to={`/servers/${server.id}`}
+      className="group block rounded-xl bg-white p-5 ring-1 ring-zinc-200 transition hover:ring-indigo-300 dark:bg-zinc-900 dark:ring-zinc-800 dark:hover:ring-indigo-500/50"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+            <ServerIcon />
+          </span>
+          <div className="min-w-0">
+            <p className="truncate font-semibold text-zinc-900 group-hover:text-indigo-600 dark:text-zinc-100">{server.name}</p>
+            <p className="truncate font-mono text-xs text-zinc-500">
+              {server.tailnetIp ?? "—"}
+              {server.provider && ` · ${server.provider}`}
+            </p>
+          </div>
+        </div>
+        {mismatch ? (
+          <Badge tone="red">identity changed</Badge>
+        ) : !pinned ? (
+          <Badge tone="yellow">{server.agentId ? "verify" : "setup"}</Badge>
+        ) : live.error ? (
+          <Badge tone="red">unreachable</Badge>
+        ) : live.data ? (
+          <Badge tone="green">
+            <ShieldIcon className="size-3" /> online
+          </Badge>
+        ) : (
+          <Spinner className="size-4 text-zinc-400" />
+        )}
+      </div>
+
+      {pinned && h && (
+        <div className="mt-4 space-y-3">
+          <Meter label={`Load · ${h.cpus} CPU`} used={h.load[0]} total={h.cpus} format={(n) => n.toFixed(1)} />
+          <Meter label="Memory" used={h.memTotal - h.memAvailable} total={h.memTotal} format={bytes} />
+          {disk && <Meter label="Disk" used={disk.total - disk.free} total={disk.total} format={bytes} />}
+          <div className="flex items-center justify-between pt-1 text-xs text-zinc-500">
+            <span>
+              {running}/{total} containers running {unhealthy > 0 && <Badge tone="yellow">{unhealthy} stack service(s) down</Badge>}
+            </span>
+            <span>up {uptime(h.uptime)}</span>
+          </div>
+        </div>
+      )}
+      {pinned && live.error && <p className="mt-4 line-clamp-2 text-xs text-red-600 dark:text-red-400">{live.error.message}</p>}
+      {!pinned && <p className="mt-4 text-xs text-zinc-500">{server.agentId ? "Confirm this server's identity to manage it." : "Run the install script, then verify the server."}</p>}
+      {server.lastSeenAt && <p className="mt-2 text-[11px] text-zinc-400">last contact {timeAgo(server.lastSeenAt)}</p>}
+    </Link>
   );
 }
