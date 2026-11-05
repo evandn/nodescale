@@ -90,8 +90,8 @@ describe("WebAuthn assertions", () => {
 });
 
 describe("operation catalogue", () => {
-  it("matches the Go agent", () => {
-    const src = readFileSync(new URL("../../../agent/internal/agent/auth.go", import.meta.url), "utf8");
+  it("matches the Go gate", () => {
+    const src = readFileSync(new URL("../../../gate/internal/gate/auth.go", import.meta.url), "utf8");
     const block = src.slice(src.indexOf("var Ops = map[string]Level{"));
     const goOps = Object.fromEntries(
       [...block.slice(0, block.indexOf("\n}")).matchAll(/"([a-z.]+)":\s+Level(\w+)/g)].map((m) => [m[1], m[2]!.toLowerCase()]),

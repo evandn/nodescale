@@ -46,8 +46,8 @@ response and exits.
 - [x] 3. Extended Docker ops (+ kill/pause/unpause/rename/update/top/exec/env, images prune, networks, volumes, system df, host.info, audit.read)
 - [x] 4. Server policy enforcement for create; stacks deploy/remove
 - [x] 5. Go tests (fake Docker API over unix socket); vectors regenerated
-- [ ] 6. Protocol TS ops catalogue sync
-- [ ] 7. Relay: dev mode runs the local gate binary; production unchanged
+- [x] 6. Protocol TS ops catalogue sync
+- [x] 7. Relay: dev mode runs the local gate binary; production unchanged
 - [ ] 8. Install / upgrade / uninstall script generator (no container), release workflow for gate binaries
 - [ ] 9. Console UI: overview with live host stats, server tabs (containers, stacks, images, networks, volumes, access, audit, system), exec, env reveal, stack editor + tunnel routes
 - [ ] 10. E2E Playwright run against the real gate binary + local dockerd
@@ -59,3 +59,4 @@ response and exits.
 (append below)
 
 - Items 1-5 done: gate one-shot, nonce files, extended ops, policy, stacks; tests incl. real-docker stack lifecycle pass.
+- Items 6-7 done: TS ops synced + vectors regenerated; relay dev mode = RELAY_DEV_GATE binary.

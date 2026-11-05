@@ -1,11 +1,11 @@
 // Command nodescale-relay runs inside a Cloudflare Container. It joins the
 // user's tailnet as an ephemeral, tagged node and forwards signed requests to
-// server agents over Tailscale SSH.
+// servers over Tailscale SSH, where nodescale-gate verifies them.
 //
 // The relay is intentionally a dumb pipe: it holds no credentials that grant
 // anything on a server. The tailnet policy only lets it SSH as the restricted
-// "nodescale" user, whose login shell can do nothing except hand one request
-// to the agent, which verifies the passkey signature itself.
+// "nodescale" user, whose login shell is nodescale-gate: it verifies the
+// passkey signature on the server itself before touching Docker.
 package main
 
 import (
@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"os/exec"
 	"os/signal"
 	"regexp"
 	"strings"
@@ -46,9 +47,9 @@ var (
 )
 
 type relay struct {
-	secret    string
-	log       *slog.Logger
-	devSocket string
+	secret  string
+	log     *slog.Logger
+	devGate string
 
 	mu       sync.Mutex
 	ts       *tsnet.Server
@@ -67,11 +68,11 @@ func main() {
 		os.Exit(1)
 	}
 	r := &relay{secret: secret, log: log, state: "down", clients: map[string]*ssh.Client{}}
-	// Development only: bypass the tailnet and SSH and hand requests straight
-	// to a local agent socket.
-	if sock := os.Getenv("RELAY_DEV_AGENT_SOCKET"); sock != "" {
-		r.devSocket, r.state, r.hostname = sock, "up", "dev"
-		log.Warn("development mode: forwarding to local agent socket", "socket", sock)
+	// Development only: bypass the tailnet and SSH and run a local gate
+	// binary for each request, exactly as the gate login shell would be run.
+	if bin := os.Getenv("RELAY_DEV_GATE"); bin != "" {
+		r.devGate, r.state, r.hostname = bin, "up", "dev"
+		log.Warn("development mode: running local gate binary instead of SSH", "gate", bin)
 	}
 
 	mux := http.NewServeMux()
@@ -271,7 +272,7 @@ func (r *relay) client(ctx context.Context, host string) (*ssh.Client, error) {
 	// Tailscale SSH authenticates the connection by tailnet identity ("none"
 	// auth) and the transport is already end-to-end encrypted by WireGuard.
 	// Host keys are not pinned because nothing sent over this channel is
-	// trusted: requests are signed by passkeys and responses by the agent.
+	// trusted: requests are signed by passkeys and responses by the server gate.
 	cfg := &ssh.ClientConfig{
 		User:            sshUser,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
@@ -317,20 +318,19 @@ func (l *limitWriter) Write(p []byte) (int, error) {
 }
 
 func (r *relay) execDev(ctx context.Context, request []byte) ([]byte, error) {
-	var d net.Dialer
-	conn, err := d.DialContext(ctx, "unix", r.devSocket)
-	if err != nil {
-		return nil, err
+	cmd := exec.CommandContext(ctx, r.devGate, "-c", "nodescale-rpc")
+	cmd.Stdin = bytes.NewReader(append(append([]byte{}, request...), '\n'))
+	stdout := &limitWriter{max: maxResponse}
+	stderr := &limitWriter{max: 64 << 10}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("gate: %v: %s", err, strings.TrimSpace(stderr.buf.String()))
 	}
-	defer conn.Close()
-	if _, err := conn.Write(append(append([]byte{}, request...), '\n')); err != nil {
-		return nil, err
-	}
-	return io.ReadAll(io.LimitReader(conn, maxResponse))
+	return stdout.buf.Bytes(), nil
 }
 
 func (r *relay) exec(ctx context.Context, host string, request []byte) ([]byte, error) {
-	if r.devSocket != "" {
+	if r.devGate != "" {
 		return r.execDev(ctx, request)
 	}
 	c, err := r.client(ctx, host)
@@ -361,11 +361,11 @@ func (r *relay) exec(ctx context.Context, host string, request []byte) ([]byte, 
 			if msg == "" {
 				msg = err.Error()
 			}
-			return nil, fmt.Errorf("agent: %s", msg)
+			return nil, fmt.Errorf("gate: %s", msg)
 		}
 	}
 	if stdout.buf.Len() == 0 {
-		return nil, errors.New("agent returned an empty response")
+		return nil, errors.New("gate returned an empty response")
 	}
 	return stdout.buf.Bytes(), nil
 }

@@ -1,5 +1,5 @@
 // Generates requests signed by the TypeScript implementation that the Go agent
-// must accept (agent/internal/agent/testdata/ts-vectors.json). Run with:
+// must accept (gate/internal/gate/testdata/ts-vectors.json). Run with:
 //   pnpm --filter @nodescale/protocol vectors
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -67,6 +67,6 @@ const out = {
   signer: { id: b64(credId), alg: -7, publicKey: spki, role: "admin", label: "ts-vector" },
   requests,
 };
-const dest = fileURLToPath(new URL("../../../agent/internal/agent/testdata/ts-vectors.json", import.meta.url));
+const dest = fileURLToPath(new URL("../../../gate/internal/gate/testdata/ts-vectors.json", import.meta.url));
 writeFileSync(dest, JSON.stringify(out, null, 2) + "\n");
 console.log("wrote", dest);
