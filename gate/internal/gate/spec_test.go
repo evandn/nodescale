@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/evandn/nodescale/gate/internal/docker"
 	"github.com/evandn/nodescale/gate/internal/protocol"
 )
 
@@ -90,5 +91,51 @@ func TestSpecValidation(t *testing.T) {
 	pb := host["PortBindings"].(map[string][]map[string]string)
 	if pb["80/tcp"][0]["HostIp"] != "127.0.0.1" {
 		t.Fatal("published ports must default to loopback")
+	}
+}
+
+func TestBindOverlap(t *testing.T) {
+	a := &ContainerSpec{Mounts: []Mount{{Type: "bind", Source: "/srv/x"}}}
+	b := &ContainerSpec{Mounts: []Mount{{Type: "bind", Source: "/srv/x/later"}}}
+	same := &ContainerSpec{Mounts: []Mount{{Type: "bind", Source: "/srv/x"}}}
+	sib := &ContainerSpec{Mounts: []Mount{{Type: "bind", Source: "/srv/xy"}}}
+	if code(checkBindOverlap([]*ContainerSpec{a, b}, nil)) != protocol.CodeForbidden {
+		t.Fatal("descendant bind in the same stack must be refused")
+	}
+	if code(checkBindOverlap([]*ContainerSpec{b}, []string{"/srv/x"})) != protocol.CodeForbidden {
+		t.Fatal("descendant of an existing bind must be refused")
+	}
+	if code(checkBindOverlap([]*ContainerSpec{a}, []string{"/srv/x/later"})) != protocol.CodeForbidden {
+		t.Fatal("ancestor of an existing bind must be refused")
+	}
+	if err := checkBindOverlap([]*ContainerSpec{a, same, sib}, []string{"/srv/x", "/srv/other"}); err != nil {
+		t.Fatalf("identical and sibling binds are fine: %v", err)
+	}
+}
+
+func TestBindSourceIsResolved(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "real"), 0o755)
+	os.Symlink(filepath.Join(root, "real"), filepath.Join(root, "link"))
+	pol := Policy{Containers: ContainerPolicy{BindMountPrefixes: []string{root}}}.withDefaults().Containers
+	s := ContainerSpec{Image: "alpine", Mounts: []Mount{{Type: "bind", Source: filepath.Join(root, "link"), Target: "/d"}}}
+	if err := s.validate(pol); err != nil {
+		t.Fatal(err)
+	}
+	if s.Mounts[0].Source != filepath.Join(root, "real") {
+		t.Fatalf("docker must receive the resolved path, got %s", s.Mounts[0].Source)
+	}
+}
+
+func TestImageRefTraversal(t *testing.T) {
+	for _, ref := range []string{"a/../../containers/x", "a/./b", "a//b", "a/", "..a/b"} {
+		if docker.ValidImage(ref) {
+			t.Errorf("%q must be rejected", ref)
+		}
+	}
+	for _, ref := range []string{"nginx", "ghcr.io/a/b:1.2", "registry:5000/x/y@sha256:abc"} {
+		if !docker.ValidImage(ref) {
+			t.Errorf("%q must be accepted", ref)
+		}
 	}
 }

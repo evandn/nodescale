@@ -37,7 +37,12 @@ func New(socketPath string) *Client {
 		MaxIdleConns:    4,
 		IdleConnTimeout: 30 * time.Second,
 	}
-	return &Client{http: &http.Client{Transport: tr}}
+	return &Client{http: &http.Client{
+		Transport: tr,
+		// Docker answers 301 for paths it normalises; following them would
+		// let a crafted reference reach a different endpoint.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}
 }
 
 // APIError is a non-2xx response from the daemon.
@@ -67,7 +72,17 @@ var imagePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.\-/:@]{0,254}$`)
 func ValidRef(s string) bool { return refPattern.MatchString(s) }
 
 // ValidImage reports whether s is a safe image reference.
-func ValidImage(s string) bool { return imagePattern.MatchString(s) }
+func ValidImage(s string) bool {
+	if !imagePattern.MatchString(s) || strings.Contains(s, "//") || strings.HasSuffix(s, "/") {
+		return false
+	}
+	for _, seg := range strings.Split(s, "/") {
+		if seg == ".." || seg == "." || strings.HasPrefix(seg, "..") {
+			return false
+		}
+	}
+	return true
+}
 
 func (c *Client) do(ctx context.Context, method, path string, q url.Values, body any) (*http.Response, error) {
 	var rdr io.Reader
@@ -140,6 +155,7 @@ type ContainerSummary struct {
 	Labels   map[string]string `json:"labels"`
 	Ports    []Port            `json:"ports"`
 	Networks []string          `json:"networks"`
+	Binds    []string          `json:"binds,omitempty"` // host sources of bind mounts
 }
 
 // Port is a published port.
@@ -176,6 +192,10 @@ func (c *Client) ListContainersFiltered(ctx context.Context, all bool, labels []
 		NetworkSettings struct {
 			Networks map[string]json.RawMessage `json:"Networks"`
 		} `json:"NetworkSettings"`
+		Mounts []struct {
+			Type   string `json:"Type"`
+			Source string `json:"Source"`
+		} `json:"Mounts"`
 	}
 	q := url.Values{}
 	if all {
@@ -200,6 +220,11 @@ func (c *Client) ListContainersFiltered(ctx context.Context, all bool, labels []
 		}
 		for n := range r.NetworkSettings.Networks {
 			s.Networks = append(s.Networks, n)
+		}
+		for _, m := range r.Mounts {
+			if m.Type == "bind" {
+				s.Binds = append(s.Binds, m.Source)
+			}
 		}
 		out = append(out, s)
 	}

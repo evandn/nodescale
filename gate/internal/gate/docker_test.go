@@ -147,3 +147,47 @@ func reqFor(op string, args any) *protocol.Request {
 	b, _ := json.Marshal(args)
 	return &protocol.Request{Op: op, Args: b}
 }
+
+func TestExistingContainerPolicy(t *testing.T) {
+	g, ctx := dockerGate(t)
+	name := "nstest-priv-" + strings.ToLower(time.Now().Format("150405"))
+	// A privileged container created outside nodescale.
+	id, err := g.docker.CreateContainer(ctx, name, map[string]any{"Image": testImage(), "Cmd": []string{"sleep", "300"}, "HostConfig": map[string]any{"Privileged": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { g.docker.Remove(context.Background(), id, true, false) })
+	for _, op := range []string{"containers.start", "containers.restart", "containers.exec", "containers.update"} {
+		args := map[string]any{"id": id}
+		if op == "containers.exec" {
+			args["cmd"] = []string{"id"}
+		}
+		if op == "containers.update" {
+			args["restart"] = "always"
+		}
+		if _, err := g.dispatch(ctx, &Verified{Req: reqFor(op, args)}); code(err) != "forbidden" {
+			t.Errorf("%s on a privileged container: %v", op, err)
+		}
+	}
+	// Stopping or removing it is still allowed.
+	if _, err := g.dispatch(ctx, &Verified{Req: reqFor("containers.stop", map[string]any{"id": id})}); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+}
+
+func TestCreateRefusesOverlappingBinds(t *testing.T) {
+	g, ctx := dockerGate(t)
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "x"), 0o755)
+	g.cfg.Policy.Containers.BindMountPrefixes = []string{dir}
+	name := "nstest-bind-" + strings.ToLower(time.Now().Format("150405"))
+	res, err := g.dispatch(ctx, &Verified{Req: reqFor("containers.create", ContainerSpec{Name: name, Image: testImage(), Cmd: []string{"sleep", "300"}, Mounts: []Mount{{Type: "bind", Source: filepath.Join(dir, "x"), Target: "/x"}}})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { g.docker.Remove(context.Background(), res.(map[string]any)["id"].(string), true, false) })
+	_, err = g.dispatch(ctx, &Verified{Req: reqFor("containers.create", ContainerSpec{Image: testImage(), Mounts: []Mount{{Type: "bind", Source: filepath.Join(dir, "x", "later"), Target: "/y"}}})})
+	if code(err) != "forbidden" {
+		t.Fatalf("bind below another container's bind must be refused, got %v", err)
+	}
+}

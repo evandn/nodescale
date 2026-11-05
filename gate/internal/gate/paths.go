@@ -27,7 +27,18 @@ var DefaultPaths = Paths{
 // docker). In that mode the environment comes from a less privileged caller
 // and must never influence which files are used.
 func Privileged() bool {
-	return syscall.Getuid() != syscall.Geteuid() || syscall.Getgid() != syscall.Getegid()
+	if syscall.Getuid() != syscall.Geteuid() || syscall.Getgid() != syscall.Getegid() {
+		return true
+	}
+	// Also when the binary itself is setuid/setgid: the effective IDs can
+	// equal the real ones (e.g. if the caller's primary group were docker)
+	// while the environment still comes from a less privileged caller.
+	if exe, err := os.Executable(); err == nil {
+		if st, err := os.Stat(exe); err == nil && st.Mode()&(os.ModeSetgid|os.ModeSetuid) != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // ResolvePaths returns the production paths, or environment overrides when

@@ -2,6 +2,7 @@ package gate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/evandn/nodescale/gate/internal/docker"
 	"github.com/evandn/nodescale/gate/internal/protocol"
@@ -119,10 +121,11 @@ func (s *ContainerSpec) validate(pol ContainerPolicy) error {
 	default:
 		return bad("pull must be missing, always or never")
 	}
-	for _, e := range s.Env {
+	for i, e := range s.Env {
 		k, _, ok := strings.Cut(e, "=")
 		if !ok || !envKeyRe.MatchString(k) {
-			return bad("environment entry %q must be KEY=value", truncate(e, 40))
+			// Never echo the entry: its value may be a secret.
+			return bad("environment entry %d must be KEY=value with a valid name", i+1)
 		}
 	}
 	for k := range s.Labels {
@@ -230,8 +233,8 @@ func (s *ContainerSpec) validate(pol ContainerPolicy) error {
 			return bad("port protocol must be tcp or udp")
 		}
 	}
-	for _, m := range s.Mounts {
-		if err := validateMount(m, pol); err != nil {
+	for i := range s.Mounts {
+		if err := validateMount(&s.Mounts[i], pol); err != nil {
 			return err
 		}
 	}
@@ -240,7 +243,7 @@ func (s *ContainerSpec) validate(pol ContainerPolicy) error {
 
 var protectedTargets = []string{"/var/run/docker.sock", "/run/docker.sock"}
 
-func validateMount(m Mount, pol ContainerPolicy) error {
+func validateMount(m *Mount, pol ContainerPolicy) error {
 	if !filepath.IsAbs(m.Target) || filepath.Clean(m.Target) == "/" {
 		return bad("mount target %q must be an absolute path other than /", m.Target)
 	}
@@ -261,8 +264,152 @@ func validateMount(m Mount, pol ContainerPolicy) error {
 		if slices.Contains(protectedTargets, src) || !underPrefixes(src, pol.BindMountPrefixes) {
 			return denied("bind mounts from %s are not allowed (allowed under %s)", src, strings.Join(pol.BindMountPrefixes, ", "))
 		}
+		// Hand Docker the resolved path, never the symlinked one.
+		m.Source = src
 	default:
 		return bad("mount type must be volume, bind or tmpfs")
+	}
+	return nil
+}
+
+func (s *ContainerSpec) bindSources() []string {
+	var out []string
+	for _, m := range s.Mounts {
+		if m.Type == "bind" {
+			out = append(out, m.Source)
+		}
+	}
+	return out
+}
+
+// nested reports whether one path is a strict ancestor of the other.
+func nested(a, b string) bool {
+	return a != b && (strings.HasPrefix(b, a+"/") || strings.HasPrefix(a, b+"/"))
+}
+
+// checkBindOverlap refuses bind mounts that are a strict ancestor or
+// descendant of another bind mount. Docker resolves bind sources each time a
+// container starts, so a container with write access to /srv/x could plant
+// a symlink at /srv/x/y and turn a sibling's bind of /srv/x/y into a mount of
+// the host's /. Identical sources are fine: neither side can replace the
+// directory itself. existing holds bind sources of containers that stay.
+func checkBindOverlap(specs []*ContainerSpec, existing []string) error {
+	var mine []string
+	for _, s := range specs {
+		mine = append(mine, s.bindSources()...)
+	}
+	for i, a := range mine {
+		for _, b := range append(slices.Clone(mine[i+1:]), existing...) {
+			if nested(a, b) {
+				return denied("bind mount %s overlaps bind mount %s; use separate directories (one could redirect the other through a symlink)", a, b)
+			}
+		}
+	}
+	return nil
+}
+
+// otherBinds lists bind sources of all containers except those whose ID is
+// in skip.
+func (g *Gate) otherBinds(ctx context.Context, skip map[string]bool) ([]string, error) {
+	all, err := g.docker.ListContainers(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, c := range all {
+		if !skip[c.ID] {
+			out = append(out, c.Binds...)
+		}
+	}
+	return out, nil
+}
+
+// withDeployLock serialises container creation so two concurrent deploys
+// cannot each pass the overlap check against the other.
+func (g *Gate) withDeployLock(fn func() error) error {
+	f, err := os.OpenFile(filepath.Join(g.opts.Paths.State, "deploy.lock"), os.O_RDWR|os.O_CREATE, 0o660)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return fn()
+}
+
+// existingPolicy applies the container policy to a container that already
+// exists (possibly created outside nodescale) before starting it, running
+// commands in it, or changing its restart policy.
+func (g *Gate) existingPolicy(ctx context.Context, id string) error {
+	var c struct {
+		Name       string `json:"Name"`
+		HostConfig struct {
+			Privileged   bool           `json:"Privileged"`
+			NetworkMode  string         `json:"NetworkMode"`
+			PidMode      string         `json:"PidMode"`
+			IpcMode      string         `json:"IpcMode"`
+			UTSMode      string         `json:"UTSMode"`
+			UsernsMode   string         `json:"UsernsMode"`
+			CgroupnsMode string         `json:"CgroupnsMode"`
+			CapAdd       []string       `json:"CapAdd"`
+			SecurityOpt  []string       `json:"SecurityOpt"`
+			Devices      []any          `json:"Devices"`
+			PortBindings map[string]any `json:"PortBindings"`
+		} `json:"HostConfig"`
+		Mounts []struct {
+			Type   string `json:"Type"`
+			Source string `json:"Source"`
+		} `json:"Mounts"`
+	}
+	raw, err := g.docker.InspectContainer(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return err
+	}
+	pol := g.cfg.Policy.withDefaults().Containers
+	h := c.HostConfig
+	name := strings.TrimPrefix(c.Name, "/")
+	deny := func(why string) error {
+		return denied("container %s does not satisfy this server's policy (%s)", name, why)
+	}
+	if h.Privileged && !pol.AllowPrivileged {
+		return deny("privileged")
+	}
+	if !pol.AllowHostNamespaces {
+		// CgroupnsMode is not checked: "host" is Docker's default on cgroup v1.
+		for _, m := range []string{h.NetworkMode, h.PidMode, h.IpcMode, h.UTSMode, h.UsernsMode} {
+			if m == "host" {
+				return deny("host namespace")
+			}
+		}
+	}
+	if len(h.Devices) > 0 && !pol.AllowDevices {
+		return deny("devices")
+	}
+	if len(h.PortBindings) > 0 && !pol.AllowPublishedPorts {
+		return deny("published ports")
+	}
+	for _, cp := range h.CapAdd {
+		cp = strings.TrimPrefix(strings.ToUpper(cp), "CAP_")
+		if !pol.AllowPrivileged && !slices.Contains(pol.AllowedCapabilities, cp) {
+			return deny("capability " + cp)
+		}
+	}
+	for _, o := range h.SecurityOpt {
+		if strings.Contains(o, "unconfined") || o == "label=disable" || o == "label:disable" {
+			if !pol.AllowPrivileged {
+				return deny("security option " + o)
+			}
+		}
+	}
+	for _, m := range c.Mounts {
+		if m.Type == "bind" && (slices.Contains(protectedTargets, m.Source) || !underPrefixes(m.Source, pol.BindMountPrefixes)) {
+			return deny("bind mount from " + m.Source)
+		}
 	}
 	return nil
 }

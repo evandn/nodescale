@@ -116,7 +116,12 @@ func (g *Gate) sealTo(recipient []byte, plaintext []byte, label string) (string,
 func (g *Gate) unsealEnv(env []string) error {
 	for i, e := range env {
 		k, v, ok := strings.Cut(e, "=")
-		if ok && strings.HasPrefix(v, sealPrefix) {
+		// Validate names before decrypting so a decrypted value can never be
+		// echoed back in an error message.
+		if !ok || !envKeyRe.MatchString(k) {
+			return bad("environment entry %d must be KEY=value with a valid name", i+1)
+		}
+		if strings.HasPrefix(v, sealPrefix) {
 			pt, err := g.unseal(v, k)
 			if err != nil {
 				return bad("environment variable %s: %v", k, err)

@@ -120,7 +120,7 @@ func (g *Gate) Handle(ctx context.Context, raw []byte) []byte {
 	now := g.opts.Now()
 	var sr protocol.SignedRequest
 	if err := json.Unmarshal(raw, &sr); err != nil {
-		return g.Respond("", nil, protocol.Errorf(protocol.CodeBadRequest, "request must be JSON"))
+		return unsignedError("", protocol.Errorf(protocol.CodeBadRequest, "request must be JSON"))
 	}
 	reqHash := ""
 	if p, err := protocol.UnB64(sr.Payload); err == nil {
@@ -129,9 +129,11 @@ func (g *Gate) Handle(ctx context.Context, raw []byte) []byte {
 
 	v, perr := g.verify(&sr, now)
 	if perr != nil {
-		// Unauthenticated failures are not logged to disk: anyone who can
-		// reach the gate could otherwise fill the log.
-		return g.Respond(reqHash, nil, perr)
+		// Failures before authentication are neither logged (anyone who can
+		// reach the gate could fill the log) nor signed: a signed "rejected"
+		// bound to a genuine request could be shown to the user while the
+		// relay submits the real request later.
+		return unsignedError(reqHash, perr)
 	}
 
 	result, err := g.dispatch(ctx, v)
@@ -183,6 +185,13 @@ func (g *Gate) Respond(reqHash string, result any, perr *protocol.Error) []byte 
 		Signature: protocol.B64(sig),
 		PublicKey: protocol.B64(g.pub),
 	})
+	return out
+}
+
+// unsignedError reports a rejection that the gate does not vouch for.
+func unsignedError(reqHash string, perr *protocol.Error) []byte {
+	payload, _ := json.Marshal(protocol.Response{V: protocol.Version, Typ: protocol.TypResponse, Req: reqHash, Error: perr})
+	out, _ := json.Marshal(protocol.SignedResponse{Payload: protocol.B64(payload)})
 	return out
 }
 

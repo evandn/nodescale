@@ -12,7 +12,14 @@ set -eu
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 WORK="$(mktemp -d)"
-trap 'kill $HTTP_PID 2>/dev/null || true; rm -rf "$WORK"' EXIT
+cleanup() {
+  kill "$HTTP_PID" 2>/dev/null || true
+  ids="$(docker ps -aq --filter label=io.nodescale.stack=itest)"
+  [ -n "$ids" ] && docker rm -f $ids >/dev/null 2>&1
+  docker network rm itest_default >/dev/null 2>&1 || true
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
 IMAGE="${NODESCALE_TEST_IMAGE:-alpine:3.20}"
 
 echo "==> build gate and serve it from a local mirror"
@@ -45,6 +52,10 @@ expect ok containers.exec '{"id":"itest-b","cmd":["sh","-c","ping -c1 -W2 a >/de
 expect "ERR" containers.create "{\"image\":\"$IMAGE\",\"privileged\":true}"
 expect "ERR" containers.create "{\"image\":\"$IMAGE\",\"mounts\":[{\"type\":\"bind\",\"source\":\"/\",\"target\":\"/host\"}]}"
 expect "ERR" stacks.remove '{"name":"itest"}' --no-uv
+# The bind-mount symlink attack: one service writes /srv/nstest/x, another
+# binds /srv/nstest/x/later. Overlapping binds must be refused.
+mkdir -p /srv/nstest/x
+expect "ERR" stacks.deploy "{\"name\":\"itest2\",\"services\":[{\"service\":\"a\",\"image\":\"$IMAGE\",\"mounts\":[{\"type\":\"bind\",\"source\":\"/srv/nstest/x\",\"target\":\"/x\"}]},{\"service\":\"b\",\"image\":\"$IMAGE\",\"mounts\":[{\"type\":\"bind\",\"source\":\"/srv/nstest/x/later\",\"target\":\"/y\"}]}]}"
 REQ="$(sign signers.list)"
 echo "$REQ" | su nodescale -c x | python3 "$ROOT/test/integration/decode.py" | grep -q '^ok'
 echo "$REQ" | su nodescale -c x | python3 "$ROOT/test/integration/decode.py" | grep -q 'replay' && echo "  replay rejected"

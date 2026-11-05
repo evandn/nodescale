@@ -136,11 +136,18 @@ func fixPermissions(p gate.Paths) {
 		_ = os.Chown(dir, 0, gid)
 		_ = os.Chmod(dir, 0o770|os.ModeSetgid)
 	}
-	for _, f := range []string{p.Config, p.Identity, filepath.Join(p.State, "audit.jsonl")} {
-		if _, err := os.Stat(f); err == nil {
-			_ = os.Chown(f, 0, gid)
-			_ = os.Chmod(f, 0o660)
-		}
+	// Files the gate created are owned by the nodescale user; the 2770
+	// directories already make them unreachable, but normalise them to root
+	// for defence in depth.
+	for _, dir := range []string{filepath.Dir(p.Config), p.State} {
+		_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() || d.Type()&os.ModeSymlink != 0 {
+				return nil
+			}
+			_ = os.Chown(path, 0, gid)
+			_ = os.Chmod(path, 0o660)
+			return nil
+		})
 	}
 	_ = os.Chmod(p.Identity, 0o640)
 }
@@ -186,6 +193,24 @@ func check(p gate.Paths) int {
 		}
 		sys := st.Sys().(*syscall.Stat_t)
 		report(sys.Uid == 0 && int(sys.Gid) == gid && st.Mode().Perm()&0o007 == 0, "directory ", dir, " is root:docker without access for others (", st.Mode(), ")")
+	}
+	for _, dir := range []string{filepath.Dir(p.Config), p.State} {
+		_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err != nil || path == dir {
+				return nil
+			}
+			st, err := os.Lstat(path)
+			if err != nil {
+				return nil
+			}
+			sys := st.Sys().(*syscall.Stat_t)
+			if st.Mode()&os.ModeSymlink != 0 {
+				report(false, "no symlinks in state directories: ", path)
+			} else if st.Mode().Perm()&0o007 != 0 || int(sys.Gid) != gid {
+				report(false, "file is group docker without access for others: ", path, " (", st.Mode(), ")")
+			}
+			return nil
+		})
 	}
 	_, err = gate.LoadConfig(p.Config)
 	report(err == nil, "configuration is valid ", p.Config, " ", err)

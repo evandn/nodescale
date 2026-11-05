@@ -144,14 +144,16 @@ func (g *Gate) verify(sr *protocol.SignedRequest, now time.Time) (*Verified, *pr
 	if len(req.Nonce) < 16 || len(req.Nonce) > 64 {
 		return nil, protocol.Errorf(protocol.CodeBadRequest, "nonce must be 16-64 characters")
 	}
-	if req.Exp <= req.Iat || req.Exp-req.Iat > pol.MaxRequestSeconds {
-		return nil, protocol.Errorf(protocol.CodeBadRequest, "request lifetime must be between 1 and %d seconds", pol.MaxRequestSeconds)
-	}
+	// Bound each timestamp against now before subtracting, so extreme values
+	// cannot overflow into an "always valid" window.
 	if req.Iat > ts+skew {
 		return nil, protocol.Errorf(protocol.CodeExpired, "request issued in the future; check clocks")
 	}
-	if req.Exp < ts-skew {
+	if req.Iat < ts-pol.MaxRequestSeconds-skew || req.Exp < ts-skew {
 		return nil, protocol.Errorf(protocol.CodeExpired, "request expired")
+	}
+	if req.Exp <= req.Iat || req.Exp-req.Iat > pol.MaxRequestSeconds {
+		return nil, protocol.Errorf(protocol.CodeBadRequest, "request lifetime must be between 1 and %d seconds", pol.MaxRequestSeconds)
 	}
 
 	rp := protocol.RelyingParty{ID: cfg.RPID, Origins: cfg.Origins}
@@ -197,11 +199,11 @@ func (g *Gate) verify(sr *protocol.SignedRequest, now time.Time) (*Verified, *pr
 		if !slices.Contains(pol.AllowSessionScopes, cert.Scope) {
 			return nil, protocol.Errorf(protocol.CodeForbidden, "session scope %q is not allowed by this server's policy", cert.Scope)
 		}
+		if cert.Iat > ts+skew || cert.Iat < ts-pol.MaxSessionSeconds-skew || cert.Exp < ts-skew {
+			return nil, protocol.Errorf(protocol.CodeExpired, "session certificate expired; unlock again")
+		}
 		if cert.Exp <= cert.Iat || cert.Exp-cert.Iat > pol.MaxSessionSeconds {
 			return nil, protocol.Errorf(protocol.CodeForbidden, "session lifetime exceeds this server's policy (%ds)", pol.MaxSessionSeconds)
-		}
-		if cert.Iat > ts+skew || cert.Exp < ts-skew {
-			return nil, protocol.Errorf(protocol.CodeExpired, "session certificate expired; unlock again")
 		}
 		if req.Exp > cert.Exp+skew {
 			return nil, protocol.Errorf(protocol.CodeExpired, "request outlives its session certificate")

@@ -317,6 +317,11 @@ func (g *Gate) dispatch(ctx context.Context, v *Verified) (any, error) {
 			return nil, protocol.Errorf(protocol.CodeBadRequest, "timeout must be 0-600 seconds")
 		}
 		var err error
+		if v.Req.Op != "containers.stop" && v.Req.Op != "containers.pause" {
+			if err := g.existingPolicy(ctx, r.ID); err != nil {
+				return nil, err
+			}
+		}
 		switch v.Req.Op {
 		case "containers.start":
 			err = d.Start(ctx, r.ID)
@@ -387,6 +392,9 @@ func (g *Gate) dispatch(ctx context.Context, v *Verified) (any, error) {
 		if err := ref(r.ID); err != nil {
 			return nil, err
 		}
+		if err := g.existingPolicy(ctx, r.ID); err != nil {
+			return nil, err
+		}
 		body := map[string]any{}
 		switch r.Restart {
 		case "":
@@ -424,6 +432,11 @@ func (g *Gate) dispatch(ctx context.Context, v *Verified) (any, error) {
 		if err := g.unsealEnv(r.Env); err != nil {
 			return nil, err
 		}
+		// Exec into a privileged or socket-mounting container would be a
+		// path to root on the host.
+		if err := g.existingPolicy(ctx, r.ID); err != nil {
+			return nil, err
+		}
 		ectx, cancel := context.WithTimeout(ctx, time.Duration(r.Timeout)*time.Second)
 		defer cancel()
 		return d.Exec(ectx, r.ID, r.Cmd, r.User, r.WorkingDir, r.Env, 1<<20)
@@ -439,7 +452,18 @@ func (g *Gate) dispatch(ctx context.Context, v *Verified) (any, error) {
 		if err := s.validate(pol.Containers); err != nil {
 			return nil, err
 		}
-		id, err := g.createContainer(ctx, &s, nil)
+		var id string
+		err := g.withDeployLock(func() error {
+			others, err := g.otherBinds(ctx, nil)
+			if err != nil {
+				return err
+			}
+			if err := checkBindOverlap([]*ContainerSpec{&s}, others); err != nil {
+				return err
+			}
+			id, err = g.createContainer(ctx, &s, nil)
+			return err
+		})
 		if err != nil {
 			return nil, err
 		}

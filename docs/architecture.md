@@ -84,6 +84,9 @@ For every request the gate:
    its fixed allow-list: containers, images, networks, volumes, stacks,
    signers, info. There's no generic "shell" or "raw API" operation.
 2. Checks the audience is this server's identity and the time window.
+   Each timestamp is bounded against the current time before any
+   arithmetic, so extreme values can't overflow into a window that never
+   expires.
 3. Verifies the signature:
    - **Direct passkey**: a WebAuthn assertion over
      `SHA-256("nodescale/v1/request" ‖ 0 ‖ payload)`, bound to the configured
@@ -99,11 +102,26 @@ For every request the gate:
 6. Applies the **container policy**. By default it refuses privileged
    containers, host network/pid/ipc namespaces, devices, published ports,
    capabilities beyond Docker's defaults, and bind mounts outside `/srv`,
-   `/opt/apps`, `/data`, `/mnt`. Bind sources are resolved through symlinks
-   first. Only root can change the policy, by editing `gate.json`.
+   `/opt/apps`, `/data`, `/mnt`. Only root can change the policy, by editing
+   `gate.json`. Bind mounts get extra protection:
+   - sources are resolved through symlinks, and Docker receives the
+     resolved path;
+   - a bind may not be a strict ancestor or descendant of any other
+     container's bind. Docker re-resolves sources on every start, so a
+     container that can write to `/srv/x` could otherwise plant a symlink
+     at `/srv/x/y` and turn a sibling's bind of `/srv/x/y` into the host's
+     `/`;
+   - creations are serialised with a lock.
+
+   Existing containers, including ones created outside nodescale, are
+   checked against the same policy before `start`, `restart`, `unpause`,
+   `update` or `exec`, so a privileged or socket-mounting container can't be
+   used as a stepping stone. Stop, kill and remove are always allowed.
 7. Decrypts sealed environment values, calls the Docker Engine API, and
    returns a response signed by the server's Ed25519 identity and bound to
-   the request hash.
+   the request hash. Rejections that happen before authentication (bad
+   signature, replay, expired) are **not** signed. Otherwise the relay could
+   show you a genuine-looking "rejected" for a request it later submits.
 8. Appends state-changing and failed authenticated requests to
    `audit.jsonl`, with environment values redacted.
 
@@ -213,10 +231,9 @@ Ways to limit this:
 - **Output isn't sealed.** Logs, exec output and inspect data travel through
   the console in plaintext. If you `echo` a secret in exec, the console sees
   it.
-- **Bind-mount race.** Symlinks are resolved before Docker mounts the path.
-  A container that can write under an allowed prefix could race a later
-  deploy. Keep allowed prefixes for data, not for paths that untrusted
-  containers write to.
+- **Host processes and bind paths.** The overlap rule covers containers. A
+  *host* process that can write under an allowed prefix could still plant
+  symlinks there, so keep the prefixes for container data only.
 - **Root on the server** can change `gate.json`. nodescale protects the
   management path, not a compromised host.
 - **Availability.** The console can refuse to relay. You can always reach

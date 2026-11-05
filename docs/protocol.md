@@ -70,8 +70,10 @@ is the challenge it issued.
 1. The payload must decode to a known `op`, with `v` = 1 and `typ`
    `nodescale.request`. Unknown JSON fields are rejected.
 2. `aud` must equal this server's identity (or `*` for public operations).
-3. Time window: `0 < exp-iat ≤ maxRequestSeconds`, `iat ≤ now+skew`, and
-   `exp ≥ now-skew`.
+3. Time window: `now-maxRequestSeconds-skew ≤ iat ≤ now+skew`,
+   `exp ≥ now-skew` and `0 < exp-iat ≤ maxRequestSeconds`, checked in that
+   order so the subtraction can't overflow. Session certificates follow the
+   same pattern with `maxSessionSeconds`.
 4. Authentication:
    - `webauthn`: the credential is trusted, and
      `clientData.type == "webauthn.get"`. The challenge matches, the origin is
@@ -103,6 +105,10 @@ is the challenge it issued.
 { "payload": "<b64>", "signature": "<b64 Ed25519 over message(response, payload)>",
   "publicKey": "<b64 raw Ed25519 key>" }
 ```
+
+Rejections that happen before authentication (bad request, bad signature,
+expired, replay) are returned **without** `signature` and `publicKey`.
+Clients must present them as unverified.
 
 The client checks:
 

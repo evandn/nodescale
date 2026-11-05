@@ -95,6 +95,16 @@ func (g *Gate) deployStack(ctx context.Context, st StackSpec) ([]StackResult, er
 		}
 	}
 
+	var results []StackResult
+	err := g.withDeployLock(func() error {
+		var err error
+		results, err = g.applyStack(ctx, st, seen)
+		return err
+	})
+	return results, err
+}
+
+func (g *Gate) applyStack(ctx context.Context, st StackSpec, seen map[string]bool) ([]StackResult, error) {
 	stackLabels := map[string]string{LabelStack: st.Name}
 	if err := g.ensureNetworks(ctx, append([]string{stackNetwork(st.Name)}, st.Networks...), stackLabels); err != nil {
 		return nil, err
@@ -110,8 +120,23 @@ func (g *Gate) deployStack(ctx context.Context, st StackSpec) ([]StackResult, er
 		return nil, err
 	}
 	byService := map[string]docker.ContainerSummary{}
+	mine := map[string]bool{}
 	for _, c := range existing {
 		byService[c.Labels[LabelService]] = c
+		mine[c.ID] = true
+	}
+	// This stack's own containers are replaced by the new spec, which is
+	// checked against itself; everything else on the host must not overlap.
+	others, err := g.otherBinds(ctx, mine)
+	if err != nil {
+		return nil, err
+	}
+	specs := make([]*ContainerSpec, len(st.Services))
+	for i := range st.Services {
+		specs[i] = &st.Services[i].ContainerSpec
+	}
+	if err := checkBindOverlap(specs, others); err != nil {
+		return nil, err
 	}
 
 	var results []StackResult

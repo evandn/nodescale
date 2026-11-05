@@ -196,18 +196,25 @@ func (h *harness) call(raw []byte) protocol.Response {
 	if err := json.Unmarshal(out, &sr); err != nil {
 		h.t.Fatalf("response is not JSON: %v", err)
 	}
-	pub, _ := protocol.UnB64(sr.PublicKey)
 	payload, _ := protocol.UnB64(sr.Payload)
+	var r protocol.Response
+	if err := json.Unmarshal(payload, &r); err != nil {
+		h.t.Fatal(err)
+	}
+	if sr.Signature == "" {
+		// Rejections before authentication are deliberately unsigned.
+		if r.Ok || r.Error == nil {
+			h.t.Fatal("only rejections may be unsigned")
+		}
+		return r
+	}
+	pub, _ := protocol.UnB64(sr.PublicKey)
 	sig, _ := protocol.UnB64(sr.Signature)
 	if !ed25519.Verify(pub, protocol.Message(protocol.DomainResponse, payload), sig) {
 		h.t.Fatal("response signature does not verify")
 	}
 	if protocol.AgentID(pub) != h.a.ID() {
 		h.t.Fatal("response key does not match agent id")
-	}
-	var r protocol.Response
-	if err := json.Unmarshal(payload, &r); err != nil {
-		h.t.Fatal(err)
 	}
 	return r
 }
@@ -421,5 +428,39 @@ func TestPolicyDeniesHostEscapes(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			expectErr(t, h.call(h.webauthn(h.admin, h.payload("containers.create", spec), assertOpts{})), protocol.CodeForbidden)
 		})
+	}
+}
+
+func TestTimeOverflowRejected(t *testing.T) {
+	h := newHarness(t)
+	// exp - iat overflows int64 and would wrap to a negative "lifetime".
+	huge := func(r *protocol.Request) { r.Iat = -6e18; r.Exp = 4e18 }
+	expectErr(t, h.call(h.webauthn(h.admin, h.payload("signers.list", nil, huge), assertOpts{})), protocol.CodeExpired)
+	s := h.session(h.admin, protocol.ScopeOperate, func(c *protocol.SessionCert) { c.Iat = -6e18; c.Exp = 4e18 })
+	expectErr(t, h.call(s.sign(h.payload("signers.list", nil))), protocol.CodeExpired)
+	// A request issued long ago is rejected even with a short lifetime.
+	old := func(r *protocol.Request) { r.Iat -= 1000; r.Exp = r.Iat + 60 }
+	expectErr(t, h.call(h.webauthn(h.admin, h.payload("signers.list", nil, old), assertOpts{})), protocol.CodeExpired)
+}
+
+func TestRejectionsAreUnsigned(t *testing.T) {
+	h := newHarness(t)
+	stranger := newPasskey(t, protocol.AlgES256)
+	out := h.a.Handle(context.Background(), h.webauthn(stranger, h.payload("signers.list", nil), assertOpts{}))
+	var sr protocol.SignedResponse
+	json.Unmarshal(out, &sr)
+	if sr.Signature != "" || sr.PublicKey != "" {
+		t.Fatal("a rejection before authentication must not be signed")
+	}
+}
+
+func TestSecretNotEchoedForBadName(t *testing.T) {
+	h := newHarness(t)
+	sealed := sealFor(t, h.a, "TOPSECRET", "BAD KEY")
+	r := h.call(h.webauthn(h.admin, h.payload("containers.create", map[string]any{"image": "alpine", "env": []string{"BAD KEY=" + sealed}}), assertOpts{}))
+	expectErr(t, r, protocol.CodeBadRequest)
+	b, _ := os.ReadFile(filepath.Join(h.dir, "audit.jsonl"))
+	if strings.Contains(r.Error.Message, "TOPSECRET") || strings.Contains(string(b), "TOPSECRET") {
+		t.Fatal("decrypted value leaked")
 	}
 }

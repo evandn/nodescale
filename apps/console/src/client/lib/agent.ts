@@ -2,6 +2,7 @@ import {
   DOMAIN,
   b64,
   challenge,
+  decodePayload,
   encodeRequest,
   levelOf,
   openSealed,
@@ -116,8 +117,19 @@ export async function callAgent<R>(server: Server, op: Op, args?: unknown, opts:
     }
   }
 
-  const raw = (await rpc(server, request)) as { payload: string; signature: string; publicKey: string };
-  const resp = await verifyResponse<R>(raw, { agentId: level === "public" ? null : pin!.agentId, requestPayload: payload });
+  const raw = (await rpc(server, request)) as { payload: string; signature?: string; publicKey?: string };
+  if (!raw.signature || !raw.publicKey) {
+    // The gate does not sign rejections that happen before authentication,
+    // so this message may come from the relay rather than the server.
+    let e: { code?: string; message?: string } = {};
+    try {
+      e = decodePayload<{ error?: typeof e }>(raw.payload).error ?? {};
+    } catch {
+      /* malformed */
+    }
+    throw new AgentError(e.code ?? "unverified", `Request rejected (unverified response): ${e.message ?? "no details"}`);
+  }
+  const resp = await verifyResponse<R>(raw as { payload: string; signature: string; publicKey: string }, { agentId: level === "public" ? null : pin!.agentId, requestPayload: payload });
   if (!resp.ok) throw new AgentError(resp.error?.code ?? "error", resp.error?.message ?? "request failed");
   return resp.result as R;
 }
