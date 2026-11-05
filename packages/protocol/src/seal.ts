@@ -11,7 +11,19 @@ import { b64, concat, unb64, utf8 } from "./encoding.ts";
  */
 export const SEAL_PREFIX = "nsseal1.";
 
-async function aeadKey(shared: ArrayBuffer, ephPub: Uint8Array, recipientPub: Uint8Array, agentId: string, usage: KeyUsage) {
+type DeriveParams = Parameters<typeof crypto.subtle.deriveBits>[0];
+
+// `public` is spelled differently across WebCrypto type definitions
+// (DOM vs. Workers); the runtime shape is the standard one.
+function x25519(peer: CryptoKey): DeriveParams {
+  return { name: "X25519", public: peer } as unknown as DeriveParams;
+}
+
+async function exportRaw(key: CryptoKey): Promise<Uint8Array<ArrayBuffer>> {
+  return new Uint8Array((await crypto.subtle.exportKey("raw", key)) as ArrayBuffer);
+}
+
+async function aeadKey(shared: ArrayBuffer, ephPub: Uint8Array, recipientPub: Uint8Array, agentId: string, usage: "encrypt" | "decrypt") {
   const ikm = await crypto.subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
   return crypto.subtle.deriveKey(
     { name: "HKDF", hash: "SHA-256", salt: concat(ephPub, recipientPub), info: utf8(`nodescale/v1/seal\u0000${agentId}`) },
@@ -27,8 +39,8 @@ export async function seal(sealKey: string, agentId: string, plaintext: string, 
   const recipientRaw = unb64(sealKey);
   const recipient = await crypto.subtle.importKey("raw", recipientRaw, { name: "X25519" }, false, []);
   const eph = (await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits"])) as CryptoKeyPair;
-  const ephPub = new Uint8Array(await crypto.subtle.exportKey("raw", eph.publicKey));
-  const shared = await crypto.subtle.deriveBits({ name: "X25519", public: recipient }, eph.privateKey, 256);
+  const ephPub = await exportRaw(eph.publicKey);
+  const shared = await crypto.subtle.deriveBits(x25519(recipient), eph.privateKey, 256);
   const key = await aeadKey(shared, ephPub, recipientRaw, agentId, "encrypt");
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: utf8(label) }, key, utf8(plaintext));
@@ -42,7 +54,7 @@ export function isSealed(v: string): boolean {
 /** An ephemeral key pair for receiving one sealed reply. */
 export async function replyKeyPair(): Promise<{ privateKey: CryptoKey; publicKey: string }> {
   const kp = (await crypto.subtle.generateKey({ name: "X25519" }, false, ["deriveBits"])) as CryptoKeyPair;
-  return { privateKey: kp.privateKey, publicKey: b64(await crypto.subtle.exportKey("raw", kp.publicKey)) };
+  return { privateKey: kp.privateKey, publicKey: b64(await exportRaw(kp.publicKey)) };
 }
 
 /** Opens a value the gate sealed to our reply key. */
@@ -51,7 +63,7 @@ export async function openSealed(privateKey: CryptoKey, publicKey: string, agent
   if (!sealed.startsWith(SEAL_PREFIX) || parts.length !== 3) throw new Error("malformed sealed value");
   const ephPub = unb64(parts[0]!);
   const peer = await crypto.subtle.importKey("raw", ephPub, { name: "X25519" }, false, []);
-  const shared = await crypto.subtle.deriveBits({ name: "X25519", public: peer }, privateKey, 256);
+  const shared = await crypto.subtle.deriveBits(x25519(peer), privateKey, 256);
   const key = await aeadKey(shared, ephPub, unb64(publicKey), agentId, "decrypt");
   const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(parts[1]!), additionalData: utf8(label) }, key, unb64(parts[2]!));
   return new TextDecoder().decode(pt);

@@ -18,7 +18,8 @@
     "@nodescale/protocol": "workspace:*",
     "hono": "^4.13.16",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react-dom": "^19.3.1",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20251101.0",

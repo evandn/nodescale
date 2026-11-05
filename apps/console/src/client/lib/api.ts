@@ -59,6 +59,15 @@ export interface Server {
   status: "pending" | "active";
   lastSeenAt: number | null;
   createdAt: number;
+  tunnelId: string | null;
+}
+
+export interface StackDef {
+  name: string;
+  compose: string;
+  updatedAt: number;
+  deployedAt: number | null;
+  updatedBy: string | null;
 }
 
 export interface PasskeyInfo {

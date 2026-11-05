@@ -11,7 +11,7 @@ const B64URL = /^[A-Za-z0-9_-]+$/;
 
 const COLUMNS = `id, name, provider, notes, tailnet_ip AS tailnetIp, tailnet_name AS tailnetName,
   tailscale_device_id AS deviceId, agent_id AS agentId, agent_public_key AS agentPublicKey,
-  status, last_seen_at AS lastSeenAt, created_at AS createdAt`;
+  status, last_seen_at AS lastSeenAt, created_at AS createdAt, tunnel_id AS tunnelId`;
 
 export const servers = new Hono<AppEnv>();
 servers.use(requireUser);
@@ -36,6 +36,7 @@ interface ServerInput {
   deviceId?: unknown;
   agentId?: unknown;
   agentPublicKey?: unknown;
+  tunnelId?: unknown;
 }
 
 function parseServer(b: ServerInput) {
@@ -47,6 +48,7 @@ function parseServer(b: ServerInput) {
     deviceId: optStr(b.deviceId, "deviceId", { max: 64, pattern: /^[A-Za-z0-9]+$/ }),
     agentId: optStr(b.agentId, "agentId", { max: 40, pattern: AGENT_ID }),
     agentPublicKey: optStr(b.agentPublicKey, "agentPublicKey", { max: 64, pattern: B64URL }),
+    tunnelId: optStr(b.tunnelId, "tunnelId", { max: 64, pattern: /^[0-9a-f-]{36}$/ }),
   };
 }
 
@@ -57,10 +59,10 @@ servers.post("/", requireRole("owner", "admin"), async (c) => {
   const s = parseServer(b);
   const id = newId("srv", 12);
   const r = await c.env.DB.prepare(
-    `INSERT INTO servers (id, workspace_id, name, provider, notes, tailnet_ip, tailnet_name, tailscale_device_id, created_by, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (workspace_id, name) DO NOTHING`,
+    `INSERT INTO servers (id, workspace_id, name, provider, notes, tailnet_ip, tailnet_name, tailscale_device_id, tunnel_id, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (workspace_id, name) DO NOTHING`,
   )
-    .bind(id, u.workspaceId, name, s.provider, s.notes, s.tailnetIp, s.tailnetName, s.deviceId, u.id, now())
+    .bind(id, u.workspaceId, name, s.provider, s.notes, s.tailnetIp, s.tailnetName, s.deviceId, s.tunnelId, u.id, now())
     .run();
   if (!r.meta.changes) fail(409, "a server with that name already exists");
   return c.json({ id });
@@ -81,6 +83,7 @@ servers.patch("/:id", requireRole("owner", "admin"), async (c) => {
   if (b.tailnetIp !== undefined) set("tailnet_ip", s.tailnetIp);
   if (b.tailnetName !== undefined) set("tailnet_name", s.tailnetName);
   if (b.deviceId !== undefined) set("tailscale_device_id", s.deviceId);
+  if (b.tunnelId !== undefined) set("tunnel_id", s.tunnelId);
   if (b.agentId !== undefined) {
     set("agent_id", s.agentId);
     set("agent_public_key", s.agentPublicKey);
@@ -156,6 +159,51 @@ servers.post("/:id/rpc", async (c) => {
     c.executionCtx.waitUntil(c.env.DB.prepare("UPDATE servers SET last_seen_at = ? WHERE id = ?").bind(now(), server.id).run());
   }
   return new Response(text, { status: res.status, headers: { "Content-Type": "application/json" } });
+});
+
+// ---------------------------------------------------------------------------
+// Stack definitions (no secrets: see migrations/0002_stacks.sql)
+
+const STACK_NAME = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+
+async function ownServer(c: { env: AppEnv["Bindings"]; get: (k: "user") => AppEnv["Variables"]["user"] }, id: string) {
+  const row = await c.env.DB.prepare("SELECT id FROM servers WHERE id = ? AND workspace_id = ?").bind(id, c.get("user").workspaceId).first();
+  if (!row) fail(404, "server not found");
+}
+
+servers.get("/:id/stacks", async (c) => {
+  await ownServer(c, c.req.param("id"));
+  const { results } = await c.env.DB.prepare(
+    `SELECT s.name, s.compose, s.updated_at AS updatedAt, s.deployed_at AS deployedAt, u.name AS updatedBy
+       FROM stacks s LEFT JOIN users u ON u.id = s.updated_by
+      WHERE s.server_id = ? ORDER BY s.name`,
+  )
+    .bind(c.req.param("id"))
+    .all();
+  return c.json(results);
+});
+
+servers.put("/:id/stacks/:name", async (c) => {
+  const u = c.get("user");
+  await ownServer(c, c.req.param("id"));
+  const name = str(c.req.param("name"), "name", { max: 63, pattern: STACK_NAME });
+  const b = await body<{ compose?: unknown; deployed?: unknown }>(c, 256 << 10);
+  const compose = str(b.compose, "compose", { max: 200 << 10 });
+  const t = now();
+  await c.env.DB.prepare(
+    `INSERT INTO stacks (server_id, workspace_id, name, compose, updated_by, updated_at, deployed_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (server_id, name) DO UPDATE SET compose = excluded.compose, updated_by = excluded.updated_by,
+       updated_at = excluded.updated_at, deployed_at = COALESCE(excluded.deployed_at, stacks.deployed_at)`,
+  )
+    .bind(c.req.param("id"), u.workspaceId, name, compose, u.id, t, b.deployed ? t : null)
+    .run();
+  return c.json({ ok: true });
+});
+
+servers.delete("/:id/stacks/:name", async (c) => {
+  await ownServer(c, c.req.param("id"));
+  await c.env.DB.prepare("DELETE FROM stacks WHERE server_id = ? AND name = ?").bind(c.req.param("id"), c.req.param("name")).run();
+  return c.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------
