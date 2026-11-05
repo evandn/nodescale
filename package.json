@@ -1,0 +1,16 @@
+{
+  "name": "nodescale",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.18.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @nodescale/console dev",
+    "build": "pnpm --filter @nodescale/console build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test && cd agent && go test ./...",
+    "deploy": "pnpm --filter @nodescale/console deploy"
+  }
+}

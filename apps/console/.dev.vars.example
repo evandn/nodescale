@@ -1,0 +1,4 @@
+# Copy to .dev.vars for `wrangler dev`.
+RELAY_SECRET=change-me-to-32-or-more-random-characters
+# Local relay started with RELAY_DEV_AGENT_SOCKET (see docs/deployment.md)
+RELAY_DEV_URL=http://localhost:8080

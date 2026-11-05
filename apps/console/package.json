@@ -1,0 +1,35 @@
+{
+  "name": "@nodescale/console",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:worker": "wrangler dev",
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.client.json && tsc -p tsconfig.worker.json",
+    "test": "vitest run",
+    "db:migrate:local": "wrangler d1 migrations apply nodescale --local",
+    "db:migrate": "wrangler d1 migrations apply nodescale --remote",
+    "deploy": "vite build && wrangler deploy"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.7",
+    "@nodescale/protocol": "workspace:*",
+    "hono": "^4.13.16",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251101.0",
+    "@tailwindcss/vite": "^4.3.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "tailwindcss": "^4.3.4",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.7",
+    "vitest": "^4.1.12",
+    "wrangler": "^4.158.0"
+  }
+}

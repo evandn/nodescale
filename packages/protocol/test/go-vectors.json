@@ -1,0 +1,23 @@
+{
+  "agentId": "ag_94e83b97fd9429f4bbead9c226c6db59",
+  "vectors": [
+    {
+      "name": "webauthn",
+      "requestPayload": "eyJ2IjoxLCJ0eXAiOiJub2Rlc2NhbGUucmVxdWVzdCIsImF1ZCI6ImFnXzk0ZTgzYjk3ZmQ5NDI5ZjRiYmVhZDljMjI2YzZkYjU5Iiwib3AiOiJzaWduZXJzLmxpc3QiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDA2MCwibm9uY2UiOiIzMngzWGU2bmRXZjZjRVhwY0p4T1lJSi0ifQ",
+      "response": {
+        "payload": "eyJ2IjoxLCJ0eXAiOiJub2Rlc2NhbGUucmVzcG9uc2UiLCJhZ2VudCI6ImFnXzk0ZTgzYjk3ZmQ5NDI5ZjRiYmVhZDljMjI2YzZkYjU5IiwicmVxIjoiYkF4QnpmUFJnR2RZUndYTFpvNjdxTWhXUzhxNE9wQVBzSk4xd3pqcmo4WSIsIm9rIjp0cnVlLCJyZXN1bHQiOlt7ImlkIjoidklZSXBqZ1EtQ085anBoXzNad2k3clhJenN3IiwiYWxnIjotNywicHVibGljS2V5IjoiTUZrd0V3WUhLb1pJemowQ0FRWUlLb1pJemowREFRY0RRZ0FFcGFMUkstOFFXVVA4Wmo1ZzlqTkprdkVZUmh3cUVmeW13Z0ZkaXNSNWJ5OEpJb3YzSUZkX3RMTkdlV0JyYktDdWdsUjE5RllKVVVfSl9tSXJZSVB6d0EiLCJyb2xlIjoiYWRtaW4iLCJsYWJlbCI6InRzLXZlY3RvciJ9XSwidHMiOjE4MDAwMDAwMDB9",
+        "signature": "mSy8LXXX2_keEQEy2XGo_YEOPmGdfCFRlHBQygWIOMdasg_w-5yWPY95uLFYGMAx2Icr5ZvO05QOZW9cZp8vBQ",
+        "publicKey": "RsMMVEBIj_9JSVNPqQZEcD2932QKTvDC2EDiDqRNaX8"
+      }
+    },
+    {
+      "name": "session",
+      "requestPayload": "eyJ2IjoxLCJ0eXAiOiJub2Rlc2NhbGUucmVxdWVzdCIsImF1ZCI6ImFnXzk0ZTgzYjk3ZmQ5NDI5ZjRiYmVhZDljMjI2YzZkYjU5Iiwib3AiOiJhZ2VudC5pbmZvIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDAwNjAsIm5vbmNlIjoiQ0dGNFd5M0NVeEo4TWRZcEUxUU5yMW43IiwiYXJncyI6e319",
+      "response": {
+        "payload": "eyJ2IjoxLCJ0eXAiOiJub2Rlc2NhbGUucmVzcG9uc2UiLCJhZ2VudCI6ImFnXzk0ZTgzYjk3ZmQ5NDI5ZjRiYmVhZDljMjI2YzZkYjU5IiwicmVxIjoieE5SN1BIZEtBNUtxVVFOVGhZVzJzQmJITWFNeGFnU1MxaXlQb3A2ZGVqTSIsIm9rIjp0cnVlLCJyZXN1bHQiOnsiYWdlbnQiOiJhZ185NGU4M2I5N2ZkOTQyOWY0YmJlYWQ5YzIyNmM2ZGI1OSIsImhvc3RuYW1lIjoidm0iLCJvcmlnaW5zIjpbImh0dHBzOi8vbm9kZXNjYWxlLmV4YW1wbGUuY29tIl0sInBvbGljeSI6eyJtYXhTZXNzaW9uU2Vjb25kcyI6Mjg4MDAsIm1heFJlcXVlc3RTZWNvbmRzIjozMDAsImNsb2NrU2tld1NlY29uZHMiOjYwLCJhbGxvd1Nlc3Npb25TY29wZXMiOlsicmVhZCIsIm9wZXJhdGUiXX0sInB1YmxpY0tleSI6IlJzTU1WRUJJal85SlNWTlBxUVpFY0QyOTMyUUtUdkRDMkVEaURxUk5hWDgiLCJycElkIjoibm9kZXNjYWxlLmV4YW1wbGUuY29tIiwic2lnbmVycyI6MSwic3RhcnRlZEF0IjoxNzk5OTk5OTkwLCJ2ZXJzaW9uIjoiZGV2In0sInRzIjoxODAwMDAwMDAwfQ",
+        "signature": "aX9jfsf25lIJ0mp9A9ShC2-cE8jrJ7hDmvDR_lL1LBVzcHc7XUTxVXuoC8gdOroOm331M4lnurQ3Ls5tCx24CQ",
+        "publicKey": "RsMMVEBIj_9JSVNPqQZEcD2932QKTvDC2EDiDqRNaX8"
+      }
+    }
+  ]
+}
