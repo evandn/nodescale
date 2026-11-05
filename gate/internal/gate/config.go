@@ -1,6 +1,7 @@
-package agent
+package gate
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/evandn/nodescale/agent/internal/protocol"
+	"github.com/evandn/nodescale/gate/internal/protocol"
 )
 
 // Roles a signer can hold.
@@ -19,7 +20,7 @@ const (
 	RoleAdmin    = "admin"
 )
 
-// Signer is a passkey trusted by this agent.
+// Signer is a passkey trusted by this server.
 type Signer struct {
 	ID        string `json:"id"` // base64url WebAuthn credential ID
 	Alg       int    `json:"alg"`
@@ -33,7 +34,8 @@ type Signer struct {
 	key *protocol.PublicKey
 }
 
-// Policy tunes verification limits.
+// Policy tunes verification limits and what containers may do on this host.
+// It can only be changed by root on the server, never over the wire.
 type Policy struct {
 	// MaxSessionSeconds caps the lifetime of a delegated session certificate.
 	MaxSessionSeconds int64 `json:"maxSessionSeconds,omitempty"`
@@ -45,9 +47,29 @@ type Policy struct {
 	// Defaults to ["read", "operate"]. Set to ["read"] to require a fresh
 	// passkey touch for every state-changing action.
 	AllowSessionScopes []string `json:"allowSessionScopes,omitempty"`
+
+	Containers ContainerPolicy `json:"containers"`
 }
 
-// Config is the on-disk agent configuration (/etc/nodescale/agent.json).
+// ContainerPolicy limits what a (passkey-signed) container spec may request.
+// The defaults keep a signed deploy from turning into root on the host.
+type ContainerPolicy struct {
+	AllowPrivileged     bool     `json:"allowPrivileged,omitempty"`
+	AllowHostNamespaces bool     `json:"allowHostNamespaces,omitempty"` // network/pid/ipc/uts/userns=host
+	AllowDevices        bool     `json:"allowDevices,omitempty"`
+	AllowPublishedPorts bool     `json:"allowPublishedPorts,omitempty"`
+	AllowedCapabilities []string `json:"allowedCapabilities,omitempty"`
+	BindMountPrefixes   []string `json:"bindMountPrefixes,omitempty"`
+}
+
+// DefaultCapabilities are capabilities that do not by themselves enable
+// escaping the container.
+var DefaultCapabilities = []string{"CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "NET_BIND_SERVICE", "SETGID", "SETUID", "SETPCAP", "AUDIT_WRITE", "SYS_CHROOT", "MKNOD", "NET_RAW", "SETFCAP"}
+
+// DefaultBindMountPrefixes are host directories bind mounts may come from.
+var DefaultBindMountPrefixes = []string{"/srv", "/opt/apps", "/data", "/mnt"}
+
+// Config is the on-disk configuration (/etc/nodescale/gate.json).
 type Config struct {
 	RPID    string   `json:"rpId"`
 	Origins []string `json:"origins"`
@@ -68,6 +90,12 @@ func (p Policy) withDefaults() Policy {
 	if p.AllowSessionScopes == nil {
 		p.AllowSessionScopes = []string{protocol.ScopeRead, protocol.ScopeOperate}
 	}
+	if p.Containers.AllowedCapabilities == nil {
+		p.Containers.AllowedCapabilities = DefaultCapabilities
+	}
+	if p.Containers.BindMountPrefixes == nil {
+		p.Containers.BindMountPrefixes = DefaultBindMountPrefixes
+	}
 	return p
 }
 
@@ -78,7 +106,7 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	var c Config
-	dec := json.NewDecoder(strings.NewReader(string(b)))
+	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
@@ -98,10 +126,14 @@ func (c *Config) validate() error {
 	}
 	for _, o := range c.Origins {
 		u, err := url.Parse(o)
-		if err != nil || u.Scheme != "https" || u.Host == "" || u.Path != "" {
-			if !(err == nil && u.Scheme == "http" && strings.HasPrefix(u.Host, "localhost")) {
-				return fmt.Errorf("origin %q must be an https origin such as https://nodescale.example.com", o)
-			}
+		ok := err == nil && u.Host != "" && u.Path == "" && (u.Scheme == "https" || (u.Scheme == "http" && u.Hostname() == "localhost"))
+		if !ok {
+			return fmt.Errorf("origin %q must be an https origin such as https://nodescale.example.com", o)
+		}
+	}
+	for _, p := range c.Policy.Containers.BindMountPrefixes {
+		if !filepath.IsAbs(p) || filepath.Clean(p) == "/" {
+			return fmt.Errorf("bind mount prefix %q must be an absolute path other than /", p)
 		}
 	}
 	seen := map[string]bool{}
@@ -136,6 +168,9 @@ func (s *Signer) init() error {
 	default:
 		return fmt.Errorf("unknown role %q", s.Role)
 	}
+	if len(s.Label) > 200 || len(s.User) > 200 || strings.ContainsAny(s.Label+s.User, "\x00\n") {
+		return errors.New("label and user must be short single-line strings")
+	}
 	k, err := protocol.ParsePublicKey(s.Alg, s.PublicKey)
 	if err != nil {
 		return err
@@ -144,22 +179,28 @@ func (s *Signer) init() error {
 	return nil
 }
 
-// Save writes the configuration atomically with 0600 permissions.
+// Save writes the configuration atomically. The containing directory is
+// root:docker 2770, so the file is unreachable to anything but root and
+// the setgid gate regardless of its owner.
 func (c *Config) Save(path string) error {
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".agent-*.json")
+	return writeAtomic(path, append(b, '\n'), 0o660)
+}
+
+func writeAtomic(path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(0o600); err != nil {
+	if err := tmp.Chmod(mode); err != nil {
 		tmp.Close()
 		return err
 	}
-	if _, err := tmp.Write(append(b, '\n')); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return err
 	}

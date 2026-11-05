@@ -1,4 +1,4 @@
-package agent
+package gate
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/evandn/nodescale/agent/internal/protocol"
+	"github.com/evandn/nodescale/gate/internal/protocol"
 )
 
 const (
@@ -102,7 +102,7 @@ func (p *passkey) assert(t *testing.T, challenge []byte, o assertOpts) *protocol
 
 type harness struct {
 	t     *testing.T
-	a     *Agent
+	a     *Gate
 	now   time.Time
 	dir   string
 	admin *passkey
@@ -118,18 +118,22 @@ func newHarness(t *testing.T, extra ...Signer) *harness {
 		t.Fatal(err)
 	}
 	h := &harness{t: t, dir: dir, admin: admin, now: time.Unix(1_800_000_000, 0)}
+	h.reload()
+	return h
+}
+
+// reload starts a fresh gate process, as every production request does.
+func (h *harness) reload() {
+	h.t.Helper()
 	a, err := New(Options{
-		ConfigPath:   filepath.Join(dir, "agent.json"),
-		IdentityPath: filepath.Join(dir, "identity.key"),
-		AuditPath:    filepath.Join(dir, "audit.jsonl"),
-		Now:          func() time.Time { return h.now },
+		Paths:          Paths{Config: filepath.Join(h.dir, "agent.json"), Identity: filepath.Join(h.dir, "identity.key"), State: h.dir, Docker: filepath.Join(h.dir, "no-docker.sock")},
+		Now:            func() time.Time { return h.now },
+		CreateIdentity: true,
 	})
 	if err != nil {
-		t.Fatal(err)
+		h.t.Fatal(err)
 	}
 	h.a = a
-	h.now = h.now.Add(time.Second)
-	return h
 }
 
 func (h *harness) payload(op string, args any, mut ...func(*protocol.Request)) []byte {
@@ -264,13 +268,16 @@ func TestRejectsUnauthenticated(t *testing.T) {
 func TestRejectsUnknownPasskey(t *testing.T) {
 	h := newHarness(t)
 	stranger := newPasskey(t, protocol.AlgES256)
-	expectErr(t, h.call(h.webauthn(stranger, h.payload("signers.list", nil), assertOpts{})), protocol.CodeUnauthorized, "not enrolled")
+	expectErr(t, h.call(h.webauthn(stranger, h.payload("signers.list", nil), assertOpts{})), protocol.CodeUnauthorized, "not trusted")
 }
 
 func TestRejectsReplay(t *testing.T) {
 	h := newHarness(t)
 	req := h.webauthn(h.admin, h.payload("signers.list", nil), assertOpts{})
 	expectOK(t, h.call(req))
+	// Replay protection must survive process restarts: each request runs in
+	// a new gate process.
+	h.reload()
 	expectErr(t, h.call(req), protocol.CodeReplay)
 }
 
@@ -304,7 +311,6 @@ func TestRejectsWrongAudienceAndTime(t *testing.T) {
 	expectErr(t, h.call(h.webauthn(h.admin, h.payload("signers.list", nil, func(r *protocol.Request) { r.Aud = "ag_other" }), assertOpts{})), protocol.CodeForbidden)
 	expectErr(t, h.call(h.webauthn(h.admin, h.payload("signers.list", nil, func(r *protocol.Request) { r.Iat -= 600; r.Exp -= 600 }), assertOpts{})), protocol.CodeExpired)
 	expectErr(t, h.call(h.webauthn(h.admin, h.payload("signers.list", nil, func(r *protocol.Request) { r.Exp = r.Iat + 3600 }), assertOpts{})), protocol.CodeBadRequest)
-	expectErr(t, h.call(h.webauthn(h.admin, h.payload("signers.list", nil, func(r *protocol.Request) { r.Iat = h.a.bootTime.Unix() - 1 }), assertOpts{})), protocol.CodeExpired, "predates")
 }
 
 func TestStateChangeRequiresUserVerification(t *testing.T) {
@@ -314,10 +320,14 @@ func TestStateChangeRequiresUserVerification(t *testing.T) {
 	expectErr(t, h.call(h.webauthn(h.admin, p, assertOpts{flags: protocol.FlagUserPresent})), protocol.CodeUnauthorized, "verification")
 	expectOK(t, h.call(h.webauthn(h.admin, h.payload("signers.add", newKey.signer(RoleOperator)), assertOpts{})))
 
-	// The change is persisted and survives a reload.
-	cfg, err := LoadConfig(filepath.Join(h.dir, "agent.json"))
-	if err != nil || len(cfg.Signers) != 2 {
-		t.Fatalf("signer not persisted: %v", err)
+	// The change is persisted and visible to the next gate process.
+	h.reload()
+	r := h.call(h.webauthn(newKey, h.payload("signers.list", nil), assertOpts{}))
+	expectOK(t, r)
+	var signers []Signer
+	json.Unmarshal(r.Result, &signers)
+	if len(signers) != 2 || signers[1].AddedBy != "admin" {
+		t.Fatalf("signer not persisted: %+v", signers)
 	}
 }
 
@@ -353,7 +363,7 @@ func TestSessionLimits(t *testing.T) {
 	expectErr(t, h.call(long.sign(h.payload("signers.list", nil))), protocol.CodeForbidden, "lifetime")
 
 	other := h.session(h.admin, protocol.ScopeOperate, func(c *protocol.SessionCert) { c.Aud = []string{"ag_someone_else"} })
-	expectErr(t, h.call(other.sign(h.payload("signers.list", nil))), protocol.CodeForbidden, "not valid for this agent")
+	expectErr(t, h.call(other.sign(h.payload("signers.list", nil))), protocol.CodeForbidden, "not valid for this server")
 
 	s := h.session(h.admin, protocol.ScopeOperate)
 	h.now = h.now.Add(2 * time.Hour)
@@ -373,9 +383,43 @@ func TestUnknownOpAndArgs(t *testing.T) {
 
 func TestAuditLogWritten(t *testing.T) {
 	h := newHarness(t)
+	k := newPasskey(t, protocol.AlgEdDSA)
+	expectOK(t, h.call(h.webauthn(h.admin, h.payload("signers.add", k.signer(RoleViewer)), assertOpts{})))
+	// Failed state-changing requests are logged too; reads are not.
+	h.call(h.webauthn(h.admin, h.payload("containers.create", map[string]any{"image": "alpine", "env": []string{"SECRET=hunter2"}, "privileged": true}), assertOpts{}))
 	h.call(h.webauthn(h.admin, h.payload("signers.list", nil), assertOpts{}))
 	b, err := os.ReadFile(filepath.Join(h.dir, "audit.jsonl"))
-	if err != nil || !strings.Contains(string(b), `"op":"signers.list"`) {
+	if err != nil || !strings.Contains(string(b), `"op":"signers.add"`) || !strings.Contains(string(b), `"op":"containers.create"`) {
 		t.Fatalf("audit log missing entry: %v %s", err, b)
+	}
+	if strings.Contains(string(b), "hunter2") || !strings.Contains(string(b), "SECRET=[redacted]") {
+		t.Fatalf("env values must be redacted in the audit log: %s", b)
+	}
+	if strings.Contains(string(b), `"op":"signers.list"`) {
+		t.Fatal("successful reads should not be logged")
+	}
+	r := h.call(h.webauthn(h.admin, h.payload("audit.read", map[string]int{"lines": 10}), assertOpts{}))
+	expectOK(t, r)
+	var entries []map[string]any
+	json.Unmarshal(r.Result, &entries)
+	if len(entries) != 2 || entries[0]["op"] != "containers.create" {
+		t.Fatalf("audit.read returned %v", entries)
+	}
+}
+
+func TestPolicyDeniesHostEscapes(t *testing.T) {
+	h := newHarness(t)
+	for name, spec := range map[string]map[string]any{
+		"privileged":  {"image": "alpine", "privileged": true},
+		"host pid":    {"image": "alpine", "pidMode": "host"},
+		"cap":         {"image": "alpine", "capAdd": []string{"SYS_ADMIN"}},
+		"docker.sock": {"image": "alpine", "mounts": []map[string]any{{"type": "bind", "source": "/var/run/docker.sock", "target": "/s"}}},
+		"root bind":   {"image": "alpine", "mounts": []map[string]any{{"type": "bind", "source": "/", "target": "/host"}}},
+		"ports":       {"image": "alpine", "ports": []map[string]any{{"containerPort": 80, "hostPort": 80}}},
+		"devices":     {"image": "alpine", "devices": []string{"/dev/sda"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			expectErr(t, h.call(h.webauthn(h.admin, h.payload("containers.create", spec), assertOpts{})), protocol.CodeForbidden)
+		})
 	}
 }

@@ -1,13 +1,12 @@
-package agent
+package gate
 
 import (
 	"bytes"
 	"encoding/json"
 	"slices"
-	"sync"
 	"time"
 
-	"github.com/evandn/nodescale/agent/internal/protocol"
+	"github.com/evandn/nodescale/gate/internal/protocol"
 )
 
 // Level is the privilege an operation requires.
@@ -24,30 +23,49 @@ func (l Level) String() string {
 	return [...]string{"public", "read", "operate", "admin"}[l]
 }
 
-// Ops is the complete catalogue of operations the agent understands, and the
+// Ops is the complete catalogue of operations the gate understands, and the
 // level each one needs. Anything not listed here is rejected. This table is
-// mirrored in packages/protocol/src/ops.ts.
+// mirrored in packages/protocol/src/ops.ts (a test keeps them in sync).
 var Ops = map[string]Level{
 	"agent.hello": LevelPublic,
 
 	"agent.info":         LevelRead,
+	"audit.read":         LevelRead,
+	"host.info":          LevelRead,
 	"system.info":        LevelRead,
+	"system.df":          LevelRead,
 	"containers.list":    LevelRead,
 	"containers.inspect": LevelRead,
 	"containers.logs":    LevelRead,
 	"containers.stats":   LevelRead,
+	"containers.top":     LevelRead,
 	"images.list":        LevelRead,
 	"networks.list":      LevelRead,
+	"volumes.list":       LevelRead,
 	"signers.list":       LevelRead,
 
 	"containers.start":   LevelOperate,
 	"containers.stop":    LevelOperate,
 	"containers.restart": LevelOperate,
+	"containers.kill":    LevelOperate,
+	"containers.pause":   LevelOperate,
+	"containers.unpause": LevelOperate,
 
 	"containers.create": LevelAdmin,
 	"containers.remove": LevelAdmin,
+	"containers.rename": LevelAdmin,
+	"containers.update": LevelAdmin,
+	"containers.exec":   LevelAdmin,
+	"containers.env":    LevelAdmin,
 	"images.pull":       LevelAdmin,
 	"images.remove":     LevelAdmin,
+	"images.prune":      LevelAdmin,
+	"networks.create":   LevelAdmin,
+	"networks.remove":   LevelAdmin,
+	"volumes.create":    LevelAdmin,
+	"volumes.remove":    LevelAdmin,
+	"stacks.deploy":     LevelAdmin,
+	"stacks.remove":     LevelAdmin,
 	"signers.add":       LevelAdmin,
 	"signers.remove":    LevelAdmin,
 }
@@ -83,38 +101,6 @@ type Verified struct {
 	AuthKind string
 }
 
-// nonceCache remembers request nonces until they expire so that a captured
-// request cannot be replayed.
-type nonceCache struct {
-	mu      sync.Mutex
-	entries map[string]int64
-}
-
-const maxNonces = 200_000
-
-func (n *nonceCache) use(nonce string, until, now int64) bool {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.entries == nil {
-		n.entries = map[string]int64{}
-	}
-	if len(n.entries) > maxNonces/2 {
-		for k, exp := range n.entries {
-			if exp < now {
-				delete(n.entries, k)
-			}
-		}
-	}
-	if _, seen := n.entries[nonce]; seen {
-		return false
-	}
-	if len(n.entries) >= maxNonces {
-		return false
-	}
-	n.entries[nonce] = until
-	return true
-}
-
 func decodeStrict(b []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
@@ -122,10 +108,10 @@ func decodeStrict(b []byte, v any) error {
 }
 
 // verify authenticates and authorises a signed request.
-func (a *Agent) verify(sr *protocol.SignedRequest, now time.Time) (*Verified, *protocol.Error) {
+func (g *Gate) verify(sr *protocol.SignedRequest, now time.Time) (*Verified, *protocol.Error) {
 	payload, err := protocol.UnB64(sr.Payload)
-	if err != nil || len(payload) > 256<<10 {
-		return nil, protocol.Errorf(protocol.CodeBadRequest, "payload must be base64url JSON under 256 KiB")
+	if err != nil || len(payload) > 512<<10 {
+		return nil, protocol.Errorf(protocol.CodeBadRequest, "payload must be base64url JSON under 512 KiB")
 	}
 	var req protocol.Request
 	if err := decodeStrict(payload, &req); err != nil {
@@ -141,19 +127,19 @@ func (a *Agent) verify(sr *protocol.SignedRequest, now time.Time) (*Verified, *p
 	v := &Verified{Req: &req, Payload: payload, Level: level}
 
 	if level == LevelPublic {
-		if req.Aud != a.id && req.Aud != "*" {
-			return nil, protocol.Errorf(protocol.CodeForbidden, "request is addressed to a different agent")
+		if req.Aud != g.id && req.Aud != "*" {
+			return nil, protocol.Errorf(protocol.CodeForbidden, "request is addressed to a different server")
 		}
 		return v, nil
 	}
 
-	cfg := a.config()
+	cfg := g.cfg
 	pol := cfg.Policy.withDefaults()
 	ts := now.Unix()
 	skew := pol.ClockSkewSeconds
 
-	if req.Aud != a.id {
-		return nil, protocol.Errorf(protocol.CodeForbidden, "request is addressed to a different agent")
+	if req.Aud != g.id {
+		return nil, protocol.Errorf(protocol.CodeForbidden, "request is addressed to a different server")
 	}
 	if len(req.Nonce) < 16 || len(req.Nonce) > 64 {
 		return nil, protocol.Errorf(protocol.CodeBadRequest, "nonce must be 16-64 characters")
@@ -167,11 +153,6 @@ func (a *Agent) verify(sr *protocol.SignedRequest, now time.Time) (*Verified, *p
 	if req.Exp < ts-skew {
 		return nil, protocol.Errorf(protocol.CodeExpired, "request expired")
 	}
-	// A request issued before this process started could have been executed
-	// by the previous process, whose nonce cache is gone.
-	if req.Iat < a.bootTime.Unix() {
-		return nil, protocol.Errorf(protocol.CodeExpired, "request predates agent start; retry")
-	}
 
 	rp := protocol.RelyingParty{ID: cfg.RPID, Origins: cfg.Origins}
 	if sr.Auth == nil {
@@ -182,7 +163,7 @@ func (a *Agent) verify(sr *protocol.SignedRequest, now time.Time) (*Verified, *p
 	case protocol.AuthWebAuthn:
 		s := cfg.signer(sr.Auth.Assertion)
 		if s == nil {
-			return nil, protocol.Errorf(protocol.CodeUnauthorized, "passkey is not enrolled on this server")
+			return nil, protocol.Errorf(protocol.CodeUnauthorized, "passkey is not trusted by this server")
 		}
 		// State-changing operations always need user verification.
 		requireUV := level >= LevelOperate
@@ -210,14 +191,14 @@ func (a *Agent) verify(sr *protocol.SignedRequest, now time.Time) (*Verified, *p
 		if cert.V != protocol.Version || cert.Typ != protocol.TypSession {
 			return nil, protocol.Errorf(protocol.CodeBadRequest, "unsupported session certificate")
 		}
-		if !slices.Contains(cert.Aud, "*") && !slices.Contains(cert.Aud, a.id) {
-			return nil, protocol.Errorf(protocol.CodeForbidden, "session certificate is not valid for this agent")
+		if !slices.Contains(cert.Aud, "*") && !slices.Contains(cert.Aud, g.id) {
+			return nil, protocol.Errorf(protocol.CodeForbidden, "session certificate is not valid for this server")
 		}
 		if !slices.Contains(pol.AllowSessionScopes, cert.Scope) {
-			return nil, protocol.Errorf(protocol.CodeForbidden, "session scope %q is not allowed by this agent's policy", cert.Scope)
+			return nil, protocol.Errorf(protocol.CodeForbidden, "session scope %q is not allowed by this server's policy", cert.Scope)
 		}
 		if cert.Exp <= cert.Iat || cert.Exp-cert.Iat > pol.MaxSessionSeconds {
-			return nil, protocol.Errorf(protocol.CodeForbidden, "session lifetime exceeds this agent's policy (%ds)", pol.MaxSessionSeconds)
+			return nil, protocol.Errorf(protocol.CodeForbidden, "session lifetime exceeds this server's policy (%ds)", pol.MaxSessionSeconds)
 		}
 		if cert.Iat > ts+skew || cert.Exp < ts-skew {
 			return nil, protocol.Errorf(protocol.CodeExpired, "session certificate expired; unlock again")
@@ -230,7 +211,7 @@ func (a *Agent) verify(sr *protocol.SignedRequest, now time.Time) (*Verified, *p
 		}
 		s := cfg.signer(c.Assertion)
 		if s == nil {
-			return nil, protocol.Errorf(protocol.CodeUnauthorized, "passkey is not enrolled on this server")
+			return nil, protocol.Errorf(protocol.CodeUnauthorized, "passkey is not trusted by this server")
 		}
 		// Starting a session always requires user verification.
 		if err := protocol.VerifyAssertion(rp, s.key, c.Assertion, protocol.Challenge(protocol.DomainSession, certPayload), true); err != nil {
@@ -254,8 +235,12 @@ func (a *Agent) verify(sr *protocol.SignedRequest, now time.Time) (*Verified, *p
 		return nil, protocol.Errorf(protocol.CodeForbidden, "role %q may not perform %q", v.Signer.Role, req.Op)
 	}
 	// Record the nonce only after authentication so unauthenticated traffic
-	// cannot fill the cache.
-	if !a.nonces.use(req.Nonce, req.Exp+skew, ts) {
+	// cannot create files.
+	fresh, err := g.nonces.use(v.Signer.ID, req.Nonce, now)
+	if err != nil {
+		return nil, protocol.Errorf(protocol.CodeInternal, "replay store: %v", err)
+	}
+	if !fresh {
 		return nil, protocol.Errorf(protocol.CodeReplay, "request has already been used")
 	}
 	return v, nil

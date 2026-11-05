@@ -41,11 +41,11 @@ response and exits.
 
 ## Plan
 
-- [ ] 1. Rename agent → gate (Go); remove daemon/socket server; gate = one-shot stdin→stdout
-- [ ] 2. File-based nonce store, secure-mode path handling, init/install subcommands
-- [ ] 3. Extended Docker ops (+ kill/pause/unpause/rename/update/top/exec/env, images prune, networks, volumes, system df, host.info, audit.read)
-- [ ] 4. Server policy enforcement for create; stacks deploy/remove
-- [ ] 5. Go tests (fake Docker API over unix socket); vectors regenerated
+- [x] 1. Rename agent → gate (Go); remove daemon/socket server; gate = one-shot stdin→stdout
+- [x] 2. File-based nonce store, secure-mode path handling, init/install subcommands
+- [x] 3. Extended Docker ops (+ kill/pause/unpause/rename/update/top/exec/env, images prune, networks, volumes, system df, host.info, audit.read)
+- [x] 4. Server policy enforcement for create; stacks deploy/remove
+- [x] 5. Go tests (fake Docker API over unix socket); vectors regenerated
 - [ ] 6. Protocol TS ops catalogue sync
 - [ ] 7. Relay: dev mode runs the local gate binary; production unchanged
 - [ ] 8. Install / upgrade / uninstall script generator (no container), release workflow for gate binaries
@@ -57,3 +57,5 @@ response and exits.
 ## Progress notes
 
 (append below)
+
+- Items 1-5 done: gate one-shot, nonce files, extended ops, policy, stacks; tests incl. real-docker stack lifecycle pass.

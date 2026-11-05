@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -51,6 +52,12 @@ func (e *APIError) Error() string { return fmt.Sprintf("docker: %s (HTTP %d)", e
 func IsNotFound(err error) bool {
 	var ae *APIError
 	return errors.As(err, &ae) && ae.Status == http.StatusNotFound
+}
+
+// IsConflict reports whether err is a 409 from the daemon.
+func IsConflict(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae) && ae.Status == http.StatusConflict
 }
 
 var refPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,127}$`)
@@ -145,6 +152,11 @@ type Port struct {
 
 // ListContainers lists containers.
 func (c *Client) ListContainers(ctx context.Context, all bool) ([]ContainerSummary, error) {
+	return c.ListContainersFiltered(ctx, all, nil)
+}
+
+// ListContainersFiltered lists containers matching label filters ("k=v" or "k").
+func (c *Client) ListContainersFiltered(ctx context.Context, all bool, labels []string) ([]ContainerSummary, error) {
 	var raw []struct {
 		ID      string            `json:"Id"`
 		Names   []string          `json:"Names"`
@@ -168,6 +180,10 @@ func (c *Client) ListContainers(ctx context.Context, all bool) ([]ContainerSumma
 	q := url.Values{}
 	if all {
 		q.Set("all", "1")
+	}
+	if len(labels) > 0 {
+		f, _ := json.Marshal(map[string][]string{"label": labels})
+		q.Set("filters", string(f))
 	}
 	if err := c.json(ctx, http.MethodGet, "/containers/json", q, nil, &raw); err != nil {
 		return nil, err
@@ -271,45 +287,8 @@ func (c *Client) Logs(ctx context.Context, id string, tail int, since int64, tty
 		}
 		return lines, sc.Err()
 	}
-	// Multiplexed stream: 8-byte header [stream, 0, 0, 0, size(be32)] then payload.
-	hdr := make([]byte, 8)
-	partial := map[string]string{}
-	for {
-		if _, err := io.ReadFull(body, hdr); err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				break
-			}
-			return nil, err
-		}
-		size := binary.BigEndian.Uint32(hdr[4:])
-		if size > 4<<20 {
-			return nil, errors.New("docker: log frame too large")
-		}
-		buf := make([]byte, size)
-		if _, err := io.ReadFull(body, buf); err != nil {
-			return nil, err
-		}
-		stream := "stdout"
-		if hdr[0] == 2 {
-			stream = "stderr"
-		}
-		text := partial[stream] + string(buf)
-		for {
-			i := bytes.IndexByte([]byte(text), '\n')
-			if i < 0 {
-				break
-			}
-			lines = append(lines, LogLine{Stream: stream, Text: text[:i]})
-			text = text[i+1:]
-		}
-		partial[stream] = text
-	}
-	for s, t := range partial {
-		if t != "" {
-			lines = append(lines, LogLine{Stream: s, Text: t})
-		}
-	}
-	return lines, nil
+	lines, _, err = demux(body, 16<<20)
+	return lines, err
 }
 
 // Stats returns a one-shot stats sample.
@@ -458,4 +437,249 @@ func (c *Client) Info(ctx context.Context) (*Info, error) {
 	}
 	i := Info(raw)
 	return &i, nil
+}
+
+func (c *Client) post(ctx context.Context, path string, q url.Values, body any) error {
+	return c.json(ctx, http.MethodPost, path, q, body, nil)
+}
+
+func cpath(id, action string) string {
+	p := "/containers/" + url.PathEscape(id)
+	if action != "" {
+		p += "/" + action
+	}
+	return p
+}
+
+// Kill sends a signal to a container.
+func (c *Client) Kill(ctx context.Context, id, signal string) error {
+	q := url.Values{}
+	if signal != "" {
+		q.Set("signal", signal)
+	}
+	return c.post(ctx, cpath(id, "kill"), q, nil)
+}
+
+// Pause freezes a container.
+func (c *Client) Pause(ctx context.Context, id string) error {
+	return c.post(ctx, cpath(id, "pause"), nil, nil)
+}
+
+// Unpause thaws a container.
+func (c *Client) Unpause(ctx context.Context, id string) error {
+	return c.post(ctx, cpath(id, "unpause"), nil, nil)
+}
+
+// Rename renames a container.
+func (c *Client) Rename(ctx context.Context, id, name string) error {
+	q := url.Values{}
+	q.Set("name", name)
+	return c.post(ctx, cpath(id, "rename"), q, nil)
+}
+
+// Update changes resource limits or the restart policy of a container.
+func (c *Client) Update(ctx context.Context, id string, body any) (json.RawMessage, error) {
+	return c.Raw(ctx, http.MethodPost, cpath(id, "update"), nil, body)
+}
+
+// Top lists processes in a container.
+func (c *Client) Top(ctx context.Context, id string) (json.RawMessage, error) {
+	return c.Raw(ctx, http.MethodGet, cpath(id, "top"), nil, nil)
+}
+
+// ExecResult is the outcome of a one-shot exec.
+type ExecResult struct {
+	ExitCode  int       `json:"exitCode"`
+	Output    []LogLine `json:"output"`
+	Truncated bool      `json:"truncated"`
+}
+
+// Exec runs a command in a container without a TTY and collects its output.
+func (c *Client) Exec(ctx context.Context, id string, cmd []string, user, workdir string, env []string, maxOutput int) (*ExecResult, error) {
+	var created struct {
+		ID string `json:"Id"`
+	}
+	body := map[string]any{"AttachStdout": true, "AttachStderr": true, "Tty": false, "Cmd": cmd}
+	if user != "" {
+		body["User"] = user
+	}
+	if workdir != "" {
+		body["WorkingDir"] = workdir
+	}
+	if len(env) > 0 {
+		body["Env"] = env
+	}
+	if err := c.json(ctx, http.MethodPost, cpath(id, "exec"), nil, body, &created); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(ctx, http.MethodPost, "/exec/"+url.PathEscape(created.ID)+"/start", nil, map[string]any{"Detach": false, "Tty": false})
+	if err != nil {
+		return nil, err
+	}
+	lines, truncated, err := demux(resp.Body, maxOutput)
+	resp.Body.Close()
+	if err != nil && ctx.Err() == nil {
+		return nil, err
+	}
+	var inspect struct {
+		ExitCode int  `json:"ExitCode"`
+		Running  bool `json:"Running"`
+	}
+	ictx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := c.json(ictx, http.MethodGet, "/exec/"+url.PathEscape(created.ID)+"/json", nil, nil, &inspect); err != nil {
+		return nil, err
+	}
+	if inspect.Running {
+		inspect.ExitCode = -1
+	}
+	return &ExecResult{ExitCode: inspect.ExitCode, Output: lines, Truncated: truncated || ctx.Err() != nil}, nil
+}
+
+// demux splits Docker's multiplexed stdout/stderr stream into lines.
+func demux(r io.Reader, max int) ([]LogLine, bool, error) {
+	hdr := make([]byte, 8)
+	lines := []LogLine{}
+	partial := map[string]string{}
+	total := 0
+	truncated := false
+	for {
+		if _, err := io.ReadFull(r, hdr); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				break
+			}
+			return lines, truncated, err
+		}
+		size := int(binary.BigEndian.Uint32(hdr[4:]))
+		if size > 4<<20 {
+			return lines, truncated, errors.New("docker: frame too large")
+		}
+		buf := make([]byte, size)
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return lines, truncated, err
+		}
+		if total+size > max {
+			truncated = true
+			buf = buf[:max-total]
+		}
+		total += len(buf)
+		stream := "stdout"
+		if hdr[0] == 2 {
+			stream = "stderr"
+		}
+		text := partial[stream] + string(buf)
+		for {
+			i := strings.IndexByte(text, '\n')
+			if i < 0 {
+				break
+			}
+			lines = append(lines, LogLine{Stream: stream, Text: text[:i]})
+			text = text[i+1:]
+		}
+		partial[stream] = text
+		if truncated {
+			break
+		}
+	}
+	for _, s := range []string{"stdout", "stderr"} {
+		if partial[s] != "" {
+			lines = append(lines, LogLine{Stream: s, Text: partial[s]})
+		}
+	}
+	return lines, truncated, nil
+}
+
+// ImageID returns the ID of a local image, or "" if it is not present.
+func (c *Client) ImageID(ctx context.Context, ref string) (string, error) {
+	var v struct {
+		ID string `json:"Id"`
+	}
+	err := c.json(ctx, http.MethodGet, "/images/"+url.PathEscape(ref)+"/json", nil, nil, &v)
+	if IsNotFound(err) {
+		return "", nil
+	}
+	return v.ID, err
+}
+
+// PruneImages removes dangling images (or all unused ones when all is set).
+func (c *Client) PruneImages(ctx context.Context, all bool) (json.RawMessage, error) {
+	q := url.Values{}
+	f, _ := json.Marshal(map[string][]string{"dangling": {strconv.FormatBool(!all)}})
+	q.Set("filters", string(f))
+	return c.Raw(ctx, http.MethodPost, "/images/prune", q, nil)
+}
+
+// CreateNetwork creates a bridge network.
+func (c *Client) CreateNetwork(ctx context.Context, name string, labels map[string]string, internal bool) (string, error) {
+	var out struct {
+		ID string `json:"Id"`
+	}
+	err := c.json(ctx, http.MethodPost, "/networks/create", nil, map[string]any{"Name": name, "Driver": "bridge", "Labels": labels, "Internal": internal, "CheckDuplicate": true}, &out)
+	return out.ID, err
+}
+
+// NetworkExists reports whether a network exists.
+func (c *Client) NetworkExists(ctx context.Context, name string) (bool, error) {
+	err := c.json(ctx, http.MethodGet, "/networks/"+url.PathEscape(name), nil, nil, nil)
+	if IsNotFound(err) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// RemoveNetwork removes a network.
+func (c *Client) RemoveNetwork(ctx context.Context, id string) error {
+	return c.json(ctx, http.MethodDelete, "/networks/"+url.PathEscape(id), nil, nil, nil)
+}
+
+// ConnectNetwork attaches a container to a network with optional aliases.
+func (c *Client) ConnectNetwork(ctx context.Context, network, container string, aliases []string) error {
+	return c.post(ctx, "/networks/"+url.PathEscape(network)+"/connect", nil, map[string]any{
+		"Container": container, "EndpointConfig": map[string]any{"Aliases": aliases},
+	})
+}
+
+// VolumeSummary is the subset of /volumes we expose.
+type VolumeSummary struct {
+	Name      string            `json:"name"`
+	Driver    string            `json:"driver"`
+	CreatedAt string            `json:"createdAt"`
+	Labels    map[string]string `json:"labels"`
+}
+
+// ListVolumes lists volumes.
+func (c *Client) ListVolumes(ctx context.Context) ([]VolumeSummary, error) {
+	var raw struct {
+		Volumes []struct {
+			Name      string            `json:"Name"`
+			Driver    string            `json:"Driver"`
+			CreatedAt string            `json:"CreatedAt"`
+			Labels    map[string]string `json:"Labels"`
+		} `json:"Volumes"`
+	}
+	if err := c.json(ctx, http.MethodGet, "/volumes", nil, nil, &raw); err != nil {
+		return nil, err
+	}
+	out := make([]VolumeSummary, 0, len(raw.Volumes))
+	for _, v := range raw.Volumes {
+		out = append(out, VolumeSummary{Name: v.Name, Driver: v.Driver, CreatedAt: v.CreatedAt, Labels: v.Labels})
+	}
+	return out, nil
+}
+
+// CreateVolume creates a local volume if it does not exist.
+func (c *Client) CreateVolume(ctx context.Context, name string, labels map[string]string) error {
+	return c.post(ctx, "/volumes/create", nil, map[string]any{"Name": name, "Driver": "local", "Labels": labels})
+}
+
+// RemoveVolume removes a volume.
+func (c *Client) RemoveVolume(ctx context.Context, name string, force bool) error {
+	q := url.Values{}
+	q.Set("force", strconv.FormatBool(force))
+	return c.json(ctx, http.MethodDelete, "/volumes/"+url.PathEscape(name), q, nil, nil)
+}
+
+// DiskUsage returns `docker system df` data.
+func (c *Client) DiskUsage(ctx context.Context) (json.RawMessage, error) {
+	return c.Raw(ctx, http.MethodGet, "/system/df", nil, nil)
 }

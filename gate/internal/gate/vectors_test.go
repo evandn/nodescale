@@ -1,4 +1,4 @@
-package agent
+package gate
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/evandn/nodescale/agent/internal/protocol"
+	"github.com/evandn/nodescale/gate/internal/protocol"
 )
 
 type tsVectors struct {
@@ -41,12 +41,11 @@ func TestTypeScriptVectors(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "agent.json"), cb, 0o600)
 	os.WriteFile(filepath.Join(dir, "identity.key"), []byte(v.AgentSeed+"\n"), 0o600)
 
-	now := time.Unix(v.Now-10, 0)
-	a, err := New(Options{ConfigPath: filepath.Join(dir, "agent.json"), IdentityPath: filepath.Join(dir, "identity.key"), Now: func() time.Time { return now }})
+	now := time.Unix(v.Now, 0)
+	a, err := New(Options{Paths: Paths{Config: filepath.Join(dir, "agent.json"), Identity: filepath.Join(dir, "identity.key"), State: dir}, Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
-	now = time.Unix(v.Now, 0)
 	if a.ID() != v.AgentID {
 		t.Fatalf("agent id derivation differs: go=%s ts=%s", a.ID(), v.AgentID)
 	}
