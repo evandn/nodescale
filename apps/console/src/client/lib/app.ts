@@ -1,4 +1,5 @@
-import { DOMAIN, b64, challenge, encodeSessionCert, nowSeconds, type Certificate, type Scope, type SignerKey, type Alg } from "@nodescale/protocol";
+import { DOMAIN, b64, challenge, encodeSessionCert, nowSeconds, unb64, verifyAssertion, type Certificate, type Scope, type SignerKey, type Alg } from "@nodescale/protocol";
+import { trustedRp } from "./release.ts";
 import { api, ApiError, type Me, type PasskeyInfo } from "./api.ts";
 import { createStore } from "./store.ts";
 import {
@@ -242,9 +243,33 @@ async function createVault(signer: Omit<SignerKey, "role">, prfOutput?: Uint8Arr
 
 /** Creates the vault for a user who signed in before one existed. */
 export async function setupVault() {
+  const me = app.get().me!;
   const session = app.get().session;
+  if (!session) throw new Error("Sign in again first");
+  try {
+    if (localStorage.getItem(`nodescale.vaultrev.${me.user.id}`)) {
+      throw new Error("This browser has seen a vault for your account before, but the console now reports none. Refusing to create a new one; restore it or contact your administrator.");
+    }
+  } catch (e) {
+    if (e instanceof Error && e.message.startsWith("This browser")) throw e;
+  }
+  // The public key becomes a trusted admin signer on new servers, so it must
+  // be the key that produced this session's assertion, not just whatever the
+  // console returns.
   const keys = await api.get<PasskeyInfo[]>("/passkeys");
-  const mine = keys.find((k) => k.id === session?.credentialId) ?? keys[0]!;
+  const mine = keys.find((k) => k.id === session.credentialId);
+  if (!mine) throw new Error("Could not find the passkey used for this session");
+  const { rpId, origin } = trustedRp(me.rp.id);
+  await verifyAssertion({
+    rp: { id: rpId, origins: [origin] },
+    alg: mine.alg as Alg,
+    publicKey: mine.publicKey,
+    assertion: session.certificate.assertion,
+    challenge: await challenge(DOMAIN.session, unb64(session.certificate.payload)),
+    requireUserVerification: true,
+  }).catch(() => {
+    throw new Error("The console returned a public key that does not match your passkey");
+  });
   await createVault({ id: mine.id, alg: mine.alg as Alg, publicKey: mine.publicKey, label: mine.label }, lastPrf);
 }
 

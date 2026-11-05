@@ -41,9 +41,9 @@ export function TrustServer({ server: initial, onDone }: { server: Server; onDon
     onDone();
   }
 
-  const typed = confirm.trim().toLowerCase();
-  const prefix = typed.replace(/^ag_/, "");
-  const matches = !!found && prefix.length >= 8 && found.agent.slice(3).startsWith(prefix);
+  // The full identity must match: a short prefix can be brute-forced.
+  const typed = confirm.trim().toLowerCase().replace(/^.*"agent":"/, "").replace(/".*$/, "");
+  const matches = !!found && (typed === found.agent || `ag_${typed}` === found.agent);
 
   return (
     <Card title="Verify server identity">
@@ -66,13 +66,13 @@ export function TrustServer({ server: initial, onDone }: { server: Server; onDon
             </Callout>
           )}
           <Callout tone="blue">
-            Compare it with the last line printed by the install script (<Code>"agent":"ag_…"</Code>). Type the first 8 or more characters after <Code>ag_</Code> to confirm.
+            Paste the server identity printed by the last line of the install script (<Code>"agent":"ag_…"</Code>, or run <Code>sudo nodescale-gate id</Code> on the server). It must match exactly.
           </Callout>
           <input
             className="block w-full rounded-lg border-0 bg-white px-3 py-2 font-mono text-sm ring-1 ring-zinc-300 dark:bg-zinc-900 dark:ring-zinc-700"
             value={confirm}
             onChange={(e) => setConfirm(e.target.value)}
-            placeholder="e.g. 94e83b97"
+            placeholder="ag_…"
             spellCheck={false}
           />
           <div className="flex gap-2">

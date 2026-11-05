@@ -1,3 +1,4 @@
+import { b64, sha256, utf8 } from "@nodescale/protocol";
 import { useMemo, useState } from "react";
 import { api, recordAudit, type Server, type StackDef } from "../../lib/api.ts";
 import { callAgent } from "../../lib/agent.ts";
@@ -228,23 +229,55 @@ function vaultSecrets(): Record<string, string> {
   return v.status === "unlocked" ? (v.data.secrets ?? {}) : {};
 }
 
+async function composeHash(text: string) {
+  return b64(await sha256(utf8(text)));
+}
+
+const PLACEHOLDER = /\$\{([A-Za-z_][A-Za-z0-9_]*)/g;
+
 async function deploy(server: Server, name: string, compose: string, parsed: ParsedStack, secrets: Record<string, string>, pull: boolean): Promise<StackResult[]> {
   const spec = interpolateEnv(parsed.spec, secrets);
   if (pull) spec.pull = "always";
+  // The compose text comes from the console, which is not trusted. If it is
+  // not exactly what this user last deployed, show all of it before signing.
+  const key = `${server.id}/${name}`;
+  const hash = await composeHash(compose);
+  const v = app.get().vault;
+  const lastHash = v.status === "unlocked" ? v.data.deployed?.[key] : undefined;
+  const changed = lastHash !== hash;
+  const secretsBySvc = parsed.spec.services.map((s) => ({
+    service: s.service,
+    names: [...new Set((s.env ?? []).flatMap((e) => [...e.slice(e.indexOf("=") + 1).matchAll(PLACEHOLDER)].map((m) => m[1]!)))],
+  }));
+  const risky = parsed.spec.services.filter((s) => s.privileged || s.networkMode === "host" || s.pidMode === "host" || s.capAdd?.length || s.devices?.length || s.mounts?.some((m) => m.type === "bind"));
   const ok = await confirmAction({
     title: `Deploy stack ${name}`,
     body: (
-      <div className="space-y-2 text-sm">
+      <div className="space-y-3 text-sm">
         <p>
-          Deploy {spec.services.length} service(s) to <strong>{server.name}</strong>: {spec.services.map((s) => s.service).join(", ")}.
+          Deploy {spec.services.length} service(s) to <strong>{server.name}</strong>. Environment values are sealed to the server.
         </p>
-        <ul className="list-disc pl-5 text-xs text-zinc-500">
-          {spec.services.map((s) => (
-            <li key={s.service}>
-              <Code>{s.image}</Code> {s.env?.length ? `· ${s.env.length} env value(s) sealed to the server` : ""}
-            </li>
-          ))}
+        <ul className="space-y-1 text-xs">
+          {spec.services.map((s) => {
+            const sec = secretsBySvc.find((x) => x.service === s.service)!.names;
+            return (
+              <li key={s.service}>
+                <strong>{s.service}</strong> <Code>{s.image}</Code>
+                {sec.length > 0 && <span className="ml-1 text-amber-700 dark:text-amber-400">receives secrets: {sec.join(", ")}</span>}
+              </li>
+            );
+          })}
         </ul>
+        {parsed.expose.length > 0 && <p className="text-xs">Public hostnames: {parsed.expose.map((e) => e.hostname).join(", ")}</p>}
+        {risky.length > 0 && <Callout tone="yellow">Host access requested by: {risky.map((s) => s.service).join(", ")} (bind mounts, capabilities or host namespaces; the server policy still applies).</Callout>}
+        {changed && (
+          <>
+            <Callout tone="yellow" title={lastHash ? "This definition changed since you last deployed it" : "You have not deployed this definition before"}>
+              Review the full compose file below. It is stored in the console, so make sure it is what you expect before signing.
+            </Callout>
+            <pre className="max-h-64 overflow-auto rounded bg-zinc-100 p-2 text-[11px] dark:bg-zinc-800">{compose}</pre>
+          </>
+        )}
         {pull && <p className="text-xs">Images will be pulled again even if present.</p>}
       </div>
     ),
@@ -254,6 +287,9 @@ async function deploy(server: Server, name: string, compose: string, parsed: Par
   if (!ok) return [];
   const results = await callAgent<StackResult[]>(server, "stacks.deploy", spec, { ttl: 300 });
   await api.put(`/servers/${server.id}/stacks/${name}`, { compose, deployed: true });
+  await updateVault((d) => {
+    d.deployed = { ...(d.deployed ?? {}), [key]: hash };
+  });
 
   // Tunnel routes for exposed services.
   const notes: string[] = [];
@@ -274,8 +310,8 @@ async function deploy(server: Server, name: string, compose: string, parsed: Par
       }
     }
   }
-  const changed = results.filter((r) => r.action !== "unchanged");
-  toast(changed.length ? `Deployed ${name}: ${changed.map((r) => `${r.service} ${r.action}`).join(", ")}` : `${name} is up to date`, "success");
+  const touched = results.filter((r) => r.action !== "unchanged");
+  toast(touched.length ? `Deployed ${name}: ${touched.map((r) => `${r.service} ${r.action}`).join(", ")}` : `${name} is up to date`, "success");
   for (const n of notes) toast(n, n.includes("→") ? "success" : "info");
   return results;
 }

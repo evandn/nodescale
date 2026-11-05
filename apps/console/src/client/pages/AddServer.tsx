@@ -4,6 +4,7 @@ import { api, recordAudit, type Member, type Server } from "../lib/api.ts";
 import { app, requireVault } from "../lib/app.ts";
 import { useAsync } from "../lib/hooks.ts";
 import { installScript } from "../lib/install.ts";
+import { GATE_RELEASE, trustedRp } from "../lib/release.ts";
 import { cloudflare, SERVER_TAG, tailscale, type TailscaleDevice } from "../lib/providers.ts";
 import { navigate } from "../lib/router.tsx";
 import { Badge, Button, Callout, Card, CodeBlock, Field, Input, PageHeader, Select, Spinner, toastError } from "../components/ui.tsx";
@@ -87,7 +88,7 @@ export function AddServerPage() {
       recordAudit("server.create", true, n, id);
       setResult({
         server,
-        script: installScript({ serverName: n, rpId: me.rp.id, origin: me.rp.origin, signers, release: me.gate, tailscaleAuthKey: authKey, cloudflareTunnelToken: tunnelToken }),
+        script: installScript({ serverName: n, ...trustedRp(me.rp.id), signers, release: GATE_RELEASE, tailscaleAuthKey: authKey, cloudflareTunnelToken: tunnelToken }),
       });
     } catch (e) {
       toastError(e);

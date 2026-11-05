@@ -45,6 +45,8 @@ export interface VaultData {
   signers: SignerKey[];
   /** Values for ${NAME} placeholders in stack definitions. */
   secrets?: Record<string, string>;
+  /** SHA-256 of the compose text this user last deployed, per server/stack. */
+  deployed?: Record<string, string>;
 }
 
 export type WrappedKey =

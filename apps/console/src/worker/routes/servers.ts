@@ -183,7 +183,7 @@ servers.get("/:id/stacks", async (c) => {
   return c.json(results);
 });
 
-servers.put("/:id/stacks/:name", async (c) => {
+servers.put("/:id/stacks/:name", requireRole("owner", "admin"), async (c) => {
   const u = c.get("user");
   await ownServer(c, c.req.param("id"));
   const name = str(c.req.param("name"), "name", { max: 63, pattern: STACK_NAME });
@@ -200,7 +200,7 @@ servers.put("/:id/stacks/:name", async (c) => {
   return c.json({ ok: true });
 });
 
-servers.delete("/:id/stacks/:name", async (c) => {
+servers.delete("/:id/stacks/:name", requireRole("owner", "admin"), async (c) => {
   await ownServer(c, c.req.param("id"));
   await c.env.DB.prepare("DELETE FROM stacks WHERE server_id = ? AND name = ?").bind(c.req.param("id"), c.req.param("name")).run();
   return c.json({ ok: true });

@@ -188,7 +188,7 @@ async function verifyLogin(c: Context<AppEnv>, challengeId: unknown, certificate
   }
   // Authenticators that keep a counter must always increase it; a regression
   // suggests a cloned authenticator.
-  if (verified.signCount > 0 && verified.signCount <= cred.sign_count) fail(401, "passkey counter regressed; possible cloned authenticator");
+  if (cred.sign_count > 0 && verified.signCount <= cred.sign_count) fail(401, "passkey counter regressed; possible cloned authenticator");
 
   const token = randomToken(32);
   await c.env.DB.batch([
@@ -242,8 +242,18 @@ auth.post("/register/finish", async (c) => {
   const userId = ch.user_id!;
   const t = now();
 
+  // Re-check the sign-up policy here: a challenge issued while the instance
+  // had no users must not let a second person open their own workspace.
+  if (!data.invite) {
+    const created = await c.env.DB.prepare(
+      "INSERT INTO users (id, name, created_at) SELECT ?, ?, ? WHERE ? = 'open' OR NOT EXISTS (SELECT 1 FROM users)",
+    )
+      .bind(userId, data.name, t, c.env.SIGNUP ?? "invite")
+      .run();
+    if (!created.meta.changes) fail(403, "sign-up is invite-only; ask a workspace admin for an invite link");
+  }
   const stmts = [
-    c.env.DB.prepare("INSERT INTO users (id, name, created_at) VALUES (?, ?, ?)").bind(userId, data.name, t),
+    ...(data.invite ? [c.env.DB.prepare("INSERT INTO users (id, name, created_at) VALUES (?, ?, ?)").bind(userId, data.name, t)] : []),
     c.env.DB.prepare(
       "INSERT INTO credentials (id, user_id, public_key, alg, label, transports, prf, sign_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ).bind(cred.id, userId, b.credential!.publicKey, b.credential!.alg, label, JSON.stringify(b.credential!.transports ?? []), b.credential!.prf ? 1 : 0, cred.signCount, t),

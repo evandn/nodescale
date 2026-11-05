@@ -3,6 +3,7 @@ import { api, recordAudit, type Server } from "../../lib/api.ts";
 import { app, updateVault } from "../../lib/app.ts";
 import { useAsync } from "../../lib/hooks.ts";
 import { uninstallScript, upgradeScript } from "../../lib/install.ts";
+import { GATE_RELEASE } from "../../lib/release.ts";
 import { cloudflare } from "../../lib/providers.ts";
 import { navigate } from "../../lib/router.tsx";
 import { ActionButton, Button, Callout, Card, CodeBlock, Field, Select, confirmAction, toast } from "../../components/ui.tsx";
@@ -58,7 +59,7 @@ export function ServerSettingsTab({ server, onChanged }: { server: Server; onCha
             <Button onClick={() => setScript(script === "upgrade" ? null : "upgrade")}>Upgrade script</Button>
             <Button onClick={() => setScript(script === "uninstall" ? null : "uninstall")}>Uninstall script</Button>
           </div>
-          {script === "upgrade" && <CodeBlock code={upgradeScript(server.name, me.gate)} filename="nodescale-upgrade.sh" />}
+          {script === "upgrade" && <CodeBlock code={upgradeScript(server.name, GATE_RELEASE)} filename="nodescale-upgrade.sh" />}
           {script === "uninstall" && <CodeBlock code={uninstallScript(server.name)} filename="nodescale-uninstall.sh" />}
         </div>
       </Card>

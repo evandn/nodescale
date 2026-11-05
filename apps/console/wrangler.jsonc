@@ -20,13 +20,7 @@
     // and every agent is configured to accept only this origin.
     "RP_ID": "localhost",
     "ORIGIN": "http://localhost:8787",
-    "SIGNUP": "invite",
-    // nodescale-gate release used by generated server install scripts. Pin
-    // the hashes printed by the Release workflow for verifiable installs.
-    "GATE_REPO": "evandn/nodescale",
-    "GATE_VERSION": "latest",
-    "GATE_SHA256_AMD64": "",
-    "GATE_SHA256_ARM64": ""
+    "SIGNUP": "invite"
   },
   // Secrets (wrangler secret put): RELAY_SECRET — 32+ random characters.
 

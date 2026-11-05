@@ -43,11 +43,15 @@ let relayPromise: Promise<void> | null = null;
 /** Makes sure the workspace relay is on the tailnet, minting a one-time key if needed. */
 export function ensureRelay(): Promise<void> {
   relayPromise ??= (async () => {
-    const s = await api.get<{ state: string; error?: string }>("/relay");
-    if (s.state === "up") return;
+    const s = await api.get<{ state: string; error?: string; ips?: string[] | null }>("/relay");
+    if (s.state === "up") {
+      await verifyRelay(s.ips ?? []);
+      return;
+    }
     const authKey = await tailscale.createAuthKey({ tags: [RELAY_TAG], ephemeral: true, reusable: false, expirySeconds: 300, description: "nodescale relay" });
-    const r = await api.post<{ state: string; error?: string }>("/relay/up", { authKey });
+    const r = await api.post<{ state: string; error?: string; ips?: string[] | null }>("/relay/up", { authKey });
     if (r.state !== "up") throw new Error(`Relay could not join the tailnet: ${r.error ?? r.state}`);
+    await verifyRelay(r.ips ?? []);
   })().finally(() => {
     relayPromise = null;
   });
@@ -64,6 +68,26 @@ async function rpc(server: Server, request: SignedRequest): Promise<unknown> {
     }
     throw e;
   }
+}
+
+let verifiedRelayIp: string | null = null;
+
+/**
+ * Checks that the relay is a node of *your* tailnet, tagged as the nodescale
+ * relay. Any workspace member can bring the relay up; this stops one from
+ * attaching it to a tailnet they control. Skipped without Tailscale credentials.
+ */
+async function verifyRelay(ips: string[]) {
+  const ip = ips.find((a) => a.startsWith("100."));
+  if (!ip || ip === verifiedRelayIp) return;
+  const v = app.get().vault;
+  if (v.status !== "unlocked" || !v.data.tailscale) return;
+  const devices = await tailscale.listDevices();
+  const dev = devices.find((d) => d.addresses.includes(ip));
+  if (!dev || !(dev.tags ?? []).includes(RELAY_TAG)) {
+    throw new Error(`The relay (${ip}) is not a nodescale relay in your tailnet. Ask an admin to check the workspace relay.`);
+  }
+  verifiedRelayIp = ip;
 }
 
 // One passkey prompt for any number of concurrent calls that need a session.
@@ -131,6 +155,14 @@ export async function callAgent<R>(server: Server, op: Op, args?: unknown, opts:
   }
   const resp = await verifyResponse<R>(raw as { payload: string; signature: string; publicKey: string }, { agentId: level === "public" ? null : pin!.agentId, requestPayload: payload });
   if (!resp.ok) throw new AgentError(resp.error?.code ?? "error", resp.error?.message ?? "request failed");
+  if (op === "agent.hello") {
+    // Before pinning, the identity in the result must be the key that signed
+    // it; otherwise anyone could vouch for a server's (or a seal) key.
+    const h = resp.result as { agent?: string; publicKey?: string; sealKey?: string };
+    if (h.agent !== resp.agent || h.publicKey !== resp.agentPublicKey || !h.sealKey) {
+      throw new AgentError("identity", "The server's identity does not match the key that signed it");
+    }
+  }
   return resp.result as R;
 }
 

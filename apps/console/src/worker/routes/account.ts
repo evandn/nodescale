@@ -15,12 +15,6 @@ me.get("/", async (c) => {
     user: { id: u.id, name: u.name, credentialId: u.credentialId },
     workspace: { ...ws, role: u.role },
     rp: { id: c.env.RP_ID, origin: c.env.ORIGIN },
-    gate: {
-      repo: c.env.GATE_REPO || "evandn/nodescale",
-      version: c.env.GATE_VERSION || "latest",
-      sha256: { amd64: c.env.GATE_SHA256_AMD64 || undefined, arm64: c.env.GATE_SHA256_ARM64 || undefined },
-      baseUrl: c.env.GATE_BASE_URL || undefined,
-    },
   });
 });
 
@@ -142,7 +136,7 @@ audit.get("/", async (c) => {
             u.name AS userName, s.name AS serverName, a.server_id AS serverId
        FROM audit_events a
        LEFT JOIN users u ON u.id = a.user_id
-       LEFT JOIN servers s ON s.id = a.server_id
+       LEFT JOIN servers s ON s.id = a.server_id AND s.workspace_id = a.workspace_id
       WHERE a.workspace_id = ? AND a.id < ?
       ORDER BY a.id DESC LIMIT 100`,
   )
@@ -154,11 +148,16 @@ audit.get("/", async (c) => {
 audit.post("/", async (c) => {
   const u = c.get("user");
   const b = await body<{ action?: unknown; ok?: unknown; detail?: unknown; serverId?: unknown }>(c);
+  let serverId: string | null = null;
+  if (typeof b.serverId === "string") {
+    const row = await c.env.DB.prepare("SELECT id FROM servers WHERE id = ? AND workspace_id = ?").bind(b.serverId, u.workspaceId).first<{ id: string }>();
+    serverId = row?.id ?? null;
+  }
   await c.env.DB.prepare("INSERT INTO audit_events (workspace_id, user_id, server_id, action, ok, detail, ip, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
     .bind(
       u.workspaceId,
       u.id,
-      typeof b.serverId === "string" ? b.serverId.slice(0, 64) : null,
+      serverId,
       str(b.action, "action", { max: 64, pattern: /^[a-z0-9._-]+$/ }),
       b.ok === false ? 0 : 1,
       typeof b.detail === "string" ? b.detail.slice(0, 1000) : null,

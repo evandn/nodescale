@@ -55,7 +55,7 @@ const step = (m) => console.log("✓", m);
   await spa(`/servers/${id}`);
   await page.getByRole("button", { name: "Find server" }).click();
   await page.getByText(ident.agent).waitFor({ timeout: 20000 });
-  await page.getByPlaceholder("e.g. 94e83b97").fill(ident.agent.slice(3, 15));
+  await page.getByPlaceholder("ag_…").fill(ident.agent);
   await page.getByRole("button", { name: "Trust this server" }).click();
   await page.getByText("nodescale gate").waitFor({ timeout: 20000 });
   await page.getByText("Memory").first().waitFor({ timeout: 20000 });

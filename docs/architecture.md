@@ -185,7 +185,11 @@ the next section).
 | Use the relay's SSH access | It lands in the gate, which only accepts signed requests; the user has no shell or groups |
 | Fake server state | Responses are signed by the pinned identity and bound to the request |
 | Swap a server for an attacker-controlled node | It can't produce responses under the pinned identity |
-| Inject a key into a new server's bootstrap | Your own keys come from the vault; teammates' keys are confirmed by fingerprint |
+| Inject a key into a new server's bootstrap | Your own keys come from the vault, or are checked against your sign-in assertion when the vault is created. Teammates' keys are confirmed by fingerprint |
+| Point installs at a malicious gate binary | The release URL and pinned hashes are compiled into the frontend; every value in the script is validated and shell-quoted |
+| Pin its own key while the server is first trusted | The identity in `agent.hello` must be the key that signed it, and the user pastes the full identity printed on the server |
+| Slip changes into a saved stack before redeploy | If the compose text differs from what you last deployed, the passkey dialog shows all of it, plus which secrets go to which service |
+| Attach the relay to a tailnet it controls | The browser checks that the relay's IP is a `tag:nodescale-relay` device in your own tailnet |
 | Phish passkeys on another domain | WebAuthn binds to the RP ID, and gates also check the origin |
 
 ### The irreducible limit: the code your browser runs
@@ -236,6 +240,9 @@ Ways to limit this:
   symlinks there, so keep the prefixes for container data only.
 - **Root on the server** can change `gate.json`. nodescale protects the
   management path, not a compromised host.
+- **Vault rollback** is detected only on devices that have seen a newer
+  vault revision. On a new browser, the console could serve an older copy of
+  your vault, for example one with older pins or credentials.
 - **Availability.** The console can refuse to relay. You can always reach
   servers with `tailscale ssh` under your own identity.
 

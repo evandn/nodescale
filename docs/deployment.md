@@ -19,7 +19,7 @@ git tag v0.1.0 && git push origin v0.1.0
 
 The **Release** workflow tests and builds `nodescale-gate-linux-{amd64,arm64}`,
 publishes `SHA256SUMS`, attaches build provenance (`gh attestation verify`),
-and prints the hashes to pin in step 4. If you fork, set `GATE_REPO`
+and prints the hashes to pin in step 4. If you fork, set `VITE_GATE_REPO`
 accordingly.
 
 ## 2. Tailnet policy
@@ -75,9 +75,14 @@ npx wrangler d1 migrations apply nodescale --remote
 # wrangler.jsonc → vars:
 #   RP_ID  = "nodescale.example.com"
 #   ORIGIN = "https://nodescale.example.com"
-#   GATE_VERSION / GATE_SHA256_AMD64 / GATE_SHA256_ARM64 = from the Release summary
 # and add a custom domain route for the Worker.
 openssl rand -base64 48 | npx wrangler secret put RELAY_SECRET
+
+# The gate release is compiled into the frontend, not served by the Worker,
+# so a compromised control plane cannot point installs at another binary.
+export VITE_GATE_VERSION=v0.1.0                 # from the Release summary
+export VITE_GATE_SHA256_AMD64=<hash> VITE_GATE_SHA256_ARM64=<hash>
+# optional: VITE_GATE_REPO=you/nodescale, VITE_GATE_BASE_URL=https://mirror.example.com/gate
 
 pnpm deploy        # builds the SPA, deploys the Worker, Durable Object and relay container
 ```
@@ -110,7 +115,8 @@ Recommended hardening:
    - runs `cloudflared` on the `nodescale` Docker network when a tunnel was
      created;
    - runs `nodescale-gate check` and prints the server identity.
-3. Back in the console, **compare the identity and click Trust**.
+3. Back in the console, **paste the full server identity** printed by the
+   script and click Trust. The comparison must be exact.
 
 For machines already on your tailnet, choose **Already on my tailnet**. The
 console tags the device and the script skips the Tailscale join.
