@@ -5,13 +5,27 @@
 - A Cloudflare account on the Workers Paid plan (Containers and Durable
   Objects need it) and a hostname for the console, e.g.
   `nodescale.example.com`.
-- Node.js 22+, pnpm 10, Docker (to build the relay image), Go 1.24+ (agent).
+- Node.js 22+, pnpm 10, Docker (to build the relay image), Go 1.24+.
 - A Tailscale tailnet where you can edit the policy file.
 
-## 1. Tailnet policy
+## 1. Publish the gate
 
-Merge the following into your tailnet policy (Admin console → Access
-controls). It is also shown in the console under Settings → Integrations.
+Server install scripts download `nodescale-gate` from this repository's
+GitHub Releases and verify its SHA-256. Tag a release:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The **Release** workflow tests and builds `nodescale-gate-linux-{amd64,arm64}`,
+publishes `SHA256SUMS`, attaches build provenance (`gh attestation verify`),
+and prints the hashes to pin in step 4. If you fork, set `GATE_REPO`
+accordingly.
+
+## 2. Tailnet policy
+
+Merge into your tailnet policy (Admin console → Access controls). It's also
+shown under Settings → Integrations.
 
 ```jsonc
 {
@@ -28,98 +42,100 @@ controls). It is also shown in the console under Settings → Integrations.
 }
 ```
 
-Keep your own SSH rules (for example `autogroup:member` → `tag:nodescale-server`
-as `root` with `"action": "check"`) for break-glass access.
+Keep your own SSH rules (for example `autogroup:member` →
+`tag:nodescale-server` as `root` with `"action": "check"`) for break-glass
+access and for running upgrade scripts.
 
-Then create an **OAuth client** (Settings → OAuth clients) with these scopes:
+Create an **OAuth client** (Settings → OAuth clients):
 
 - `auth_keys` (write), tags `tag:nodescale-server`, `tag:nodescale-relay`
 - `devices:core` (write), same tags
 
-Do **not** grant `policy_file`. Each user enters this client into their own
-encrypted vault in the console. You can create one per person to keep
-accountability.
+Do **not** grant `policy_file`. Each user enters the client into their own
+encrypted vault. One client per person keeps accountability clear.
 
-## 2. Cloudflare API token
+## 3. Cloudflare API token
 
-Create a token (My Profile → API Tokens → Create custom token) with:
+Create a custom token (My Profile → API Tokens) with:
 
 - Account → **Cloudflare Tunnel: Edit**
 - Zone → **DNS: Edit** and **Zone: Read**, limited to the zones you serve
 
 Consider client IP filtering and an expiry date.
 
-## 3. Deploy the console
+## 4. Deploy the console
 
 ```sh
 pnpm install
 cd apps/console
 
-# D1
-npx wrangler d1 create nodescale         # copy database_id into wrangler.jsonc
+npx wrangler d1 create nodescale              # put database_id in wrangler.jsonc
 npx wrangler d1 migrations apply nodescale --remote
 
-# Configuration
-#   wrangler.jsonc → vars.RP_ID  = "nodescale.example.com"
-#                    vars.ORIGIN = "https://nodescale.example.com"
-#                    add a custom domain route for the Worker
+# wrangler.jsonc → vars:
+#   RP_ID  = "nodescale.example.com"
+#   ORIGIN = "https://nodescale.example.com"
+#   GATE_VERSION / GATE_SHA256_AMD64 / GATE_SHA256_ARM64 = from the Release summary
+# and add a custom domain route for the Worker.
 openssl rand -base64 48 | npx wrangler secret put RELAY_SECRET
 
-# Build the SPA and deploy the Worker, Durable Object and relay container
-pnpm deploy
+pnpm deploy        # builds the SPA, deploys the Worker, Durable Object and relay container
 ```
 
-The first person to sign up becomes the owner of a new workspace. After
-that, sign-up needs an invite link (Team → Invites), unless you set
-`SIGNUP = "open"`.
+The first person to sign up becomes the owner of a new workspace. After that,
+sign-up needs an invite link (Team → Invites), unless `SIGNUP = "open"`.
 
-**`RP_ID` and `ORIGIN` are permanent.** Passkeys are bound to the RP ID and
-every agent only accepts the configured origin. Changing them means
-re-registering passkeys and updating `/etc/nodescale/agent.json` on every
-server.
+**`RP_ID` and `ORIGIN` are permanent.** Passkeys are bound to the RP ID, and
+every server only accepts the configured origin.
 
-Optional hardening:
+Recommended hardening:
 
-- Put the console behind **Cloudflare Access**, with your identity provider
-  as an outer gate.
-- Restrict who can deploy (Cloudflare account roles, protected branches, and
-  required reviews on the repo the console deploys from).
-
-## 4. Publish the agent image
-
-Installs pull `ghcr.io/evandn/nodescale-agent:latest` by default.
-`.github/workflows/agent-image.yml` builds and pushes it for `linux/amd64`
-and `linux/arm64` on every push to `main` and on tags. If you fork, change
-`AGENT_IMAGE` in `apps/console/src/client/lib/install.ts`.
+- Put the console behind **Cloudflare Access** (your IdP as an outer gate).
+- Restrict who can deploy the Worker (Cloudflare roles, protected branches,
+  required reviews).
 
 ## 5. Add servers
 
-In the console go to **Servers → Add server**. It will:
+**Servers → Add server**:
 
-1. mint a one-hour, single-use Tailscale auth key in your browser
-   (`tag:nodescale-server`);
-2. optionally create a Cloudflare Tunnel;
-3. generate `nodescale-install.sh`.
+1. Your browser mints a one-hour, single-use Tailscale auth key and,
+   optionally, creates a Cloudflare Tunnel linked to the server.
+2. Run the generated `nodescale-install.sh` once as root, e.g. from your
+   provider's console. It:
+   - installs Docker and Tailscale if missing and enables Tailscale SSH;
+   - downloads and verifies the gate and installs it `root:docker 2755`;
+   - creates the restricted `nodescale` user (login shell = gate, no groups);
+   - writes `/etc/nodescale/gate.json` (your passkeys and default policy)
+     and creates the identity key;
+   - runs `cloudflared` on the `nodescale` Docker network when a tunnel was
+     created;
+   - runs `nodescale-gate check` and prints the server identity.
+3. Back in the console, **compare the identity and click Trust**.
 
-Run the script once as root (for example from your provider's console). On
-the server it:
-
-- installs Docker and Tailscale if missing, and joins with `--ssh`;
-- creates the `nodescale` user with the gate as its login shell;
-- writes `/etc/nodescale/agent.json` with your passkeys;
-- runs the agent with `--network none --read-only --cap-drop ALL`;
-- starts `cloudflared` on the `nodescale` Docker network if you chose a
-  tunnel;
-- prints the agent ID. Compare it in the console before clicking **Trust**.
-
-For servers already on your tailnet, choose **Already on my tailnet**. The
+For machines already on your tailnet, choose **Already on my tailnet**. The
 console tags the device and the script skips the Tailscale join.
 
-### Exposing a service
+Upgrade and uninstall scripts are under Server → Settings. Run them as root,
+e.g. `tailscale ssh root@<server>`.
 
-Deploy containers on the `nodescale` network without publishing ports. Then
-go to **Tunnels → Route** and map `app.example.com` → `http://<container>:<port>`.
-The console updates the tunnel's ingress and creates the proxied DNS record.
+### Server policy
+
+`/etc/nodescale/gate.json` → `policy` can only be changed by root on the
+server:
+
+```jsonc
+"policy": {
+  "maxSessionSeconds": 28800,           // cap on browser session keys
+  "allowSessionScopes": ["read", "operate"],   // ["read"] = touch passkey for every change
+  "containers": {
+    "allowPrivileged": false, "allowHostNamespaces": false, "allowDevices": false,
+    "allowPublishedPorts": false,
+    "bindMountPrefixes": ["/srv", "/opt/apps", "/data", "/mnt"]
+  }
+}
+```
+
+Run `sudo nodescale-gate check` after editing.
 
 ## Local development
 
@@ -128,17 +144,24 @@ pnpm install
 cd apps/console
 npx wrangler d1 migrations apply nodescale --local
 cp .dev.vars.example .dev.vars
-pnpm build && npx wrangler dev --enable-containers=false   # http://localhost:8787
+pnpm build && npx wrangler dev --enable-containers=false      # http://localhost:8787
 
-# In another shell: a relay that skips Tailscale and talks to a local agent
-cd relay && RELAY_SECRET=<same as .dev.vars> RELAY_DEV_AGENT_SOCKET=/tmp/ns/agent.sock go run .
-
-# And a local agent (Docker must be running)
-cd agent && NODESCALE_CONFIG=/tmp/ns/agent.json NODESCALE_IDENTITY=/tmp/ns/id.key \
-  NODESCALE_SOCKET=/tmp/ns/agent.sock NODESCALE_AUDIT=/tmp/ns/audit.jsonl go run ./cmd/nodescale-agent
+# Relay in dev mode: no tailnet, runs a local gate binary per request.
+cd relay && RELAY_SECRET=<same as .dev.vars> RELAY_DEV_GATE=/path/to/nodescale-gate go run .
 ```
 
-`/tmp/ns/agent.json` needs `"rpId": "localhost"`, `"origins": ["http://localhost:8787"]`
-and your passkey from `GET /api/passkeys` as an `admin` signer.
-`RELAY_DEV_URL` only takes effect when `ORIGIN` starts with
-`http://localhost`.
+Without root, point the gate at a scratch config with `NODESCALE_CONFIG`,
+`NODESCALE_STATE` and `DOCKER_SOCKET` (these overrides are ignored when the
+gate runs setgid). The config needs `"rpId": "localhost"`,
+`"origins": ["http://localhost:8787"]` and your passkey from
+`GET /api/passkeys` as an `admin` signer.
+
+## Tests
+
+| Command | What it covers |
+| --- | --- |
+| `pnpm test` | TypeScript unit tests, cross-language vectors, Go tests (including real-Docker tests when a daemon is available) |
+| `sudo -E env "PATH=$PATH" sh test/integration/server-install.sh` | Runs the generated install script on this host and drives the setgid gate through `su nodescale` |
+| `sudo -E env "PATH=$PATH" sh test/e2e/run.sh` | Full browser → Worker → relay → gate → Docker flow with a virtual passkey |
+
+The last two modify the host; CI runs them on disposable runners.
