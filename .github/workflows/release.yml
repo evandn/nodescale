@@ -1,0 +1,60 @@
+name: Release
+
+# Publishes nodescale-gate binaries that the server install script downloads
+# and verifies. Tag a commit `vX.Y.Z` to release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build"
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: gate/go.mod
+      - name: Test
+        working-directory: gate
+        run: go test ./...
+      - name: Build
+        working-directory: gate
+        run: |
+          mkdir -p ../dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -buildvcs=false \
+              -ldflags "-s -w -X github.com/evandn/nodescale/gate/internal/gate.Version=$TAG" \
+              -o ../dist/nodescale-gate-linux-$arch ./cmd/nodescale-gate
+          done
+          cd ../dist && sha256sum nodescale-gate-linux-* > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/nodescale-gate-linux-*
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --generate-notes --title "$TAG"
+          gh release upload "$TAG" dist/* --clobber
+          {
+            echo "### Pin these hashes in the console (wrangler vars)"
+            echo '```'
+            echo "GATE_VERSION=$TAG"
+            echo "GATE_SHA256_AMD64=$(grep amd64 dist/SHA256SUMS | cut -d' ' -f1)"
+            echo "GATE_SHA256_ARM64=$(grep arm64 dist/SHA256SUMS | cut -d' ' -f1)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

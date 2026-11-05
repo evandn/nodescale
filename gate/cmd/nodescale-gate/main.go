@@ -39,7 +39,9 @@ func main() {
 			fmt.Println(gate.Version)
 			return
 		case "init", "id", "check":
-			if gate.Privileged() || os.Geteuid() != 0 {
+			// Real UID: root running this setgid binary gains egid docker,
+			// which is fine; anyone else is refused.
+			if os.Getuid() != 0 {
 				fmt.Fprintln(os.Stderr, "this command must be run as root")
 				os.Exit(1)
 			}
@@ -132,7 +134,7 @@ func fixPermissions(p gate.Paths) {
 	for _, dir := range []string{filepath.Dir(p.Config), p.State, filepath.Join(p.State, "nonces")} {
 		_ = os.MkdirAll(dir, 0o770)
 		_ = os.Chown(dir, 0, gid)
-		_ = os.Chmod(dir, 0o2770)
+		_ = os.Chmod(dir, 0o770|os.ModeSetgid)
 	}
 	for _, f := range []string{p.Config, p.Identity, filepath.Join(p.State, "audit.jsonl")} {
 		if _, err := os.Stat(f); err == nil {

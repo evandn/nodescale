@@ -23,19 +23,21 @@ jobs:
       - run: pnpm -r test
       - run: pnpm --filter @nodescale/console build
 
-  agent:
+  gate:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: agent
+        working-directory: gate
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: agent/go.mod
+          go-version-file: gate/go.mod
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
+      # Includes integration tests against the runner's Docker daemon.
       - run: go test -race ./...
+      - run: CGO_ENABLED=0 go build -o /tmp/nodescale-gate ./cmd/nodescale-gate
 
   relay:
     runs-on: ubuntu-latest
@@ -49,3 +51,18 @@ jobs:
           go-version-file: relay/go.mod
       - run: go vet ./...
       - run: go build ./...
+
+  # Runs the generated install script on the runner and drives the installed
+  # setgid gate through `su nodescale`, exactly as Tailscale SSH does.
+  server-integration:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: gate/go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: docker pull alpine:3.20
+      - run: sudo -E env "PATH=$PATH" sh test/integration/server-install.sh

@@ -43,6 +43,7 @@ export interface Me {
   user: { id: string; name: string; credentialId: string | null };
   workspace: { id: string; name: string; role: "owner" | "admin" | "member" };
   rp: { id: string; origin: string };
+  gate: import("./install.ts").GateRelease;
 }
 
 export interface Server {

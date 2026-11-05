@@ -13,6 +13,13 @@ export interface Env {
   /** Shared secret between the Worker and the relay container. */
   RELAY_SECRET: string;
   AUTH_LIMITER?: RateLimit;
+  /** Gate release used by generated install scripts. */
+  GATE_REPO?: string;
+  GATE_VERSION?: string;
+  GATE_SHA256_AMD64?: string;
+  GATE_SHA256_ARM64?: string;
+  /** Optional mirror for gate binaries (must serve SHA256SUMS too). */
+  GATE_BASE_URL?: string;
   /** Development only (honoured when ORIGIN is http://localhost…). */
   RELAY_DEV_URL?: string;
 }

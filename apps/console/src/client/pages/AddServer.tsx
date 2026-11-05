@@ -84,7 +84,7 @@ export function AddServerPage() {
       recordAudit("server.create", true, n, id);
       setResult({
         server,
-        script: installScript({ serverName: n, rpId: me.rp.id, origin: me.rp.origin, signers, tailscaleAuthKey: authKey, cloudflareTunnelToken: tunnelToken }),
+        script: installScript({ serverName: n, rpId: me.rp.id, origin: me.rp.origin, signers, release: me.gate, tailscaleAuthKey: authKey, cloudflareTunnelToken: tunnelToken }),
       });
     } catch (e) {
       toastError(e);

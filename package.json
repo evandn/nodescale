@@ -10,7 +10,7 @@
     "dev": "pnpm --filter @nodescale/console dev",
     "build": "pnpm --filter @nodescale/console build",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test && cd agent && go test ./...",
+    "test": "pnpm -r test && cd gate && go test ./...",
     "deploy": "pnpm --filter @nodescale/console deploy"
   }
 }

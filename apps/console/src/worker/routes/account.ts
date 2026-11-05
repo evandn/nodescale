@@ -15,6 +15,12 @@ me.get("/", async (c) => {
     user: { id: u.id, name: u.name, credentialId: u.credentialId },
     workspace: { ...ws, role: u.role },
     rp: { id: c.env.RP_ID, origin: c.env.ORIGIN },
+    gate: {
+      repo: c.env.GATE_REPO || "evandn/nodescale",
+      version: c.env.GATE_VERSION || "latest",
+      sha256: { amd64: c.env.GATE_SHA256_AMD64 || undefined, arm64: c.env.GATE_SHA256_ARM64 || undefined },
+      baseUrl: c.env.GATE_BASE_URL || undefined,
+    },
   });
 });
 

@@ -63,8 +63,7 @@ export interface TailscaleDevice {
   authorized: boolean;
 }
 
-export const SERVER_TAG = "tag:nodescale-server";
-export const RELAY_TAG = "tag:nodescale-relay";
+export { RELAY_TAG, SERVER_TAG } from "./tags.ts";
 
 let tsToken: { forSecret: string; token: string; exp: number } | null = null;
 
