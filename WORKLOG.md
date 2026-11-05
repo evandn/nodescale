@@ -50,7 +50,7 @@ response and exits.
 - [x] 7. Relay: dev mode runs the local gate binary; production unchanged
 - [x] 8. Install / upgrade / uninstall script generator (no container), release workflow for gate binaries
 - [x] 9. Console UI: overview with live host stats, server tabs (containers, stacks, images, networks, volumes, access, audit, system), exec, env reveal, stack editor + tunnel routes
-- [ ] 10. E2E Playwright run against the real gate binary + local dockerd
+- [x] 10. E2E Playwright run against the real gate binary + local dockerd
 - [ ] 11. Docs (architecture/threat model, protocol, deployment), README
 - [ ] 12. Final review (security pass), cleanup, remove this worklog or convert to CHANGELOG
 
@@ -63,3 +63,4 @@ response and exits.
 - Item 8 done: install/upgrade/uninstall generator, release workflow, test/integration/server-install.sh passes on Ubuntu 24.04 (setgid gate via su). Fixed: root check must use real uid; dir setgid via os.ModeSetgid.
 - 9a/9b done: sealed env values (X25519+HKDF+AES-GCM) gate<->browser, containers.env returns sealed reply, HMAC spec hash; cross-language vectors.
 - Item 9 done: server tabs (overview/containers/stacks/images/resources/access/audit/settings), live dashboard, compose stacks with vault secrets + sealed env, tunnel routes via x-nodescale.expose, secrets settings. Needs E2E validation (item 10).
+- Item 10 done: test/e2e/run.sh (browser→worker→relay→su nodescale→setgid gate→docker) passes; verifies no plaintext secret in API traffic or D1. Added to CI.
