@@ -14,9 +14,9 @@ export E2E_PERSIST="$WORK/state"
 SECRET="e2e-relay-secret-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 
 cleanup() {
-  [ -f "$WORK/relay.pid" ] && kill "$(cat "$WORK/relay.pid")" 2>/dev/null || true
-  [ -f "$WORK/wrangler.pid" ] && kill "$(cat "$WORK/wrangler.pid")" 2>/dev/null || true
-  pkill -f "wrangler dev --port 8787" 2>/dev/null || true
+  [ -f "$WORK/relay.pid" ] && kill -TERM "-$(cat "$WORK/relay.pid")" 2>/dev/null || true
+  # wrangler runs in its own process group (setsid) so workerd children go too.
+  [ -f "$WORK/wrangler.pid" ] && kill -TERM "-$(cat "$WORK/wrangler.pid")" 2>/dev/null || true
   if [ -f "$ROOT/apps/console/.dev.vars.e2e-backup" ]; then
     mv "$ROOT/apps/console/.dev.vars.e2e-backup" "$ROOT/apps/console/.dev.vars"
   else
@@ -24,6 +24,11 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+if curl -s -o /dev/null http://localhost:8787 || curl -s -o /dev/null http://localhost:8080; then
+  echo "ports 8787/8080 are in use; stop other dev servers first" >&2
+  exit 1
+fi
 
 # 1. Server side, exactly as in production.
 if ! command -v nodescale-gate >/dev/null 2>&1; then
@@ -34,7 +39,7 @@ chmod 755 /usr/local/bin/ns-gate-via-su
 
 # 2. Relay in dev mode: runs the gate through the nodescale login shell.
 (cd "$ROOT/relay" && GOTOOLCHAIN=auto go build -o "$WORK/relay" .)
-RELAY_SECRET="$SECRET" RELAY_DEV_GATE=/usr/local/bin/ns-gate-via-su "$WORK/relay" >"$WORK/relay.log" 2>&1 &
+RELAY_SECRET="$SECRET" RELAY_DEV_GATE=/usr/local/bin/ns-gate-via-su setsid "$WORK/relay" >"$WORK/relay.log" 2>&1 &
 echo $! > "$WORK/relay.pid"
 
 # 3. Console, with its local state in $WORK.
@@ -43,7 +48,7 @@ cd "$ROOT/apps/console"
 printf 'RELAY_SECRET=%s\nRELAY_DEV_URL=http://localhost:8080\n' "$SECRET" > .dev.vars
 npx wrangler d1 migrations apply nodescale --local --persist-to "$E2E_PERSIST" >/dev/null
 npx vite build >/dev/null
-npx wrangler dev --port 8787 --enable-containers=false --persist-to "$E2E_PERSIST" >"$WORK/wrangler.log" 2>&1 &
+setsid npx wrangler dev --port 8787 --enable-containers=false --persist-to "$E2E_PERSIST" >"$WORK/wrangler.log" 2>&1 &
 echo $! > "$WORK/wrangler.pid"
 for _ in $(seq 1 60); do
   curl -s -o /dev/null -w "%{http_code}" http://localhost:8787/api/me | grep -q 401 && break

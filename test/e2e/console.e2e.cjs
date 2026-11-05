@@ -18,11 +18,13 @@ const step = (m) => console.log("✓", m);
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 960 } });
   const page = await ctx.newPage();
+  global.__page = page;
   const sent = [];
   page.on("request", (r) => {
     if (r.url().includes("/api/")) sent.push(`${r.method()} ${r.url()} ${r.postData() ?? ""}`);
   });
-  page.on("pageerror", (e) => console.log("[pageerror]", e.message));
+  const pageErrors = [];
+  page.on("pageerror", (e) => pageErrors.push(e.message));
   const cdp = await ctx.newCDPSession(page);
   await cdp.send("WebAuthn.enable");
   await cdp.send("WebAuthn.addVirtualAuthenticator", {
@@ -134,11 +136,33 @@ volumes:
   // Remove the stack.
   await spa(`/servers/${id}`);
   await page.getByRole("button", { name: "Stacks" }).click();
+  await page.getByText("2/2 running").waitFor({ timeout: 20000 });
   await page.locator("section", { hasText: "demo" }).getByRole("button", { name: "Remove" }).click();
   await page.getByRole("button", { name: "Sign with passkey" }).click();
   await page.getByText("Stack demo removed").waitFor({ timeout: 30000 });
   if (execSync("docker ps -a --format '{{.Names}}'").toString().includes("demo-")) throw new Error("stack containers still exist");
   step("stack removed");
+
+  // Every page renders without errors.
+  for (const [nav, heading] of [["Tunnels", "Tunnels"], ["Team", "Team"], ["Audit log", "Audit log"], ["Settings", "Settings"]]) {
+    await page.getByRole("link", { name: nav }).click();
+    await page.getByRole("heading", { name: heading }).waitFor();
+  }
+  for (const tab of ["Secrets", "Passkeys", "Security", "Integrations"]) {
+    await page.getByRole("button", { name: tab, exact: true }).click();
+  }
+  await page.getByRole("heading", { name: "Tailnet policy" }).waitFor();
+  await page.getByRole("button", { name: "Secrets", exact: true }).click();
+  await page.getByText("API_KEY").waitFor(); // saved during deploy
+  await shot(page, "e2e-08-secrets");
+  await page.getByRole("link", { name: "Team" }).click();
+  await page.getByText("Alex Admin").first().waitFor();
+  await page.getByRole("link", { name: "Audit log" }).click();
+  await page.getByText("stack.remove").waitFor({ timeout: 10000 });
+  await spa("/servers/new");
+  await page.getByText("Tailscale credentials needed").waitFor();
+  if (pageErrors.length) throw new Error("page errors:\n" + pageErrors.join("\n"));
+  step("all pages render without errors");
 
   // Secrets never left the browser in plaintext.
   const leaks = sent.filter((s) => s.includes(SECRET));
@@ -148,7 +172,11 @@ volumes:
   step(`no plaintext secret in ${sent.length} API requests or in D1`);
 
   await browser.close();
-})().catch((e) => {
+})().catch(async (e) => {
   console.error("E2E FAILED:", e);
+  try {
+    await global.__page?.screenshot({ path: path.join(OUT, "e2e-failure.png") });
+    console.error("screenshot:", path.join(OUT, "e2e-failure.png"));
+  } catch {}
   process.exit(1);
 });

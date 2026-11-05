@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Badge, Button, Callout, CloudIcon, CodeBlock, ConfirmHost, CogIcon, Field, Input, ListIcon, LockIcon, Modal, ServerIcon, ShieldIcon, Spinner, ToastHost, UsersIcon, cx, toastError } from "./components/ui.tsx";
 import { app, lock, register, renewSession, sessionValid, setupVault, signIn, signOut, unlockWithRecoveryKey } from "./lib/app.ts";
 import { formatDuration, useNow } from "./lib/hooks.ts";
@@ -269,7 +269,29 @@ const NAV = [
   { to: "/settings", label: "Settings", icon: CogIcon },
 ];
 
+/** Forget all keys after this long without interaction. */
+const IDLE_LOCK_MS = 30 * 60 * 1000;
+
+function useIdleLock() {
+  useEffect(() => {
+    let last = Date.now();
+    const touch = () => {
+      last = Date.now();
+    };
+    const events = ["pointerdown", "keydown", "wheel", "touchstart"] as const;
+    events.forEach((e) => window.addEventListener(e, touch, { passive: true }));
+    const t = setInterval(() => {
+      if (Date.now() - last > IDLE_LOCK_MS) lock();
+    }, 30_000);
+    return () => {
+      events.forEach((e) => window.removeEventListener(e, touch));
+      clearInterval(t);
+    };
+  }, []);
+}
+
 function Shell() {
+  useIdleLock();
   const loc = useLocation();
   const path = loc.split("?")[0]!;
   const me = app.use((s) => s.me)!;

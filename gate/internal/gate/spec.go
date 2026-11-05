@@ -138,6 +138,23 @@ func (s *ContainerSpec) validate(pol ContainerPolicy) error {
 			return bad("network or alias %q is invalid", n)
 		}
 	}
+	// Docker's built-in network names select a network mode; listing them in
+	// networks must not bypass the namespace policy below.
+	for _, n := range s.Networks {
+		switch n {
+		case "host":
+			if !pol.AllowHostNamespaces {
+				return denied("sharing host namespaces is not allowed")
+			}
+			if len(s.Networks) > 1 {
+				return bad("the host network cannot be combined with other networks")
+			}
+		case "none", "bridge":
+			if len(s.Networks) > 1 {
+				return bad("the %s network cannot be combined with other networks", n)
+			}
+		}
+	}
 	for _, h := range s.ExtraHosts {
 		if !hostEntry.MatchString(h) {
 			return bad("extra host %q must be name:ip", h)

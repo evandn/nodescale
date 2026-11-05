@@ -65,3 +65,4 @@ response and exits.
 - Item 9 done: server tabs (overview/containers/stacks/images/resources/access/audit/settings), live dashboard, compose stacks with vault secrets + sealed env, tunnel routes via x-nodescale.expose, secrets settings. Needs E2E validation (item 10).
 - Item 10 done: test/e2e/run.sh (browser→worker→relay→su nodescale→setgid gate→docker) passes; verifies no plaintext secret in API traffic or D1. Added to CI.
 - Item 11 done: architecture/threat model, protocol (sealing, stacks), stacks guide, deployment, README rewritten for the daemonless gate.
+- Review pass 1: fixed host-network bypass via networks list; stack remove race (definition deleted while live state loading); idle auto-lock 30m; E2E process cleanup. Independent gate review running.

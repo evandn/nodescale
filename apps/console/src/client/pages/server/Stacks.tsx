@@ -109,14 +109,16 @@ export function StacksTab({ server }: { server: Server }) {
           Paste a docker-compose.yml. Secrets stay encrypted end to end.
         </Empty>
       ) : (
-        rows.map((r) => <StackCard key={r.name} server={server} row={r} onEdit={() => setEditing({ name: r.name, compose: r.def?.compose ?? "", isNew: false })} onChanged={reload} />)
+        rows.map((r) => (
+          <StackCard key={r.name} server={server} row={r} live={!!live.data && !live.loading} onEdit={() => setEditing({ name: r.name, compose: r.def?.compose ?? "", isNew: false })} onChanged={reload} />
+        ))
       )}
       {editing && <StackEditor server={server} initial={editing} onClose={() => setEditing(null)} onDeployed={reload} />}
     </div>
   );
 }
 
-function StackCard({ server, row, onEdit, onChanged }: { server: Server; row: StackRow; onEdit: () => void; onChanged: () => void }) {
+function StackCard({ server, row, live, onEdit, onChanged }: { server: Server; row: StackRow; live: boolean; onEdit: () => void; onChanged: () => void }) {
   const running = row.containers.filter((c) => c.state === "running").length;
   return (
     <Card
@@ -124,9 +126,13 @@ function StackCard({ server, row, onEdit, onChanged }: { server: Server; row: St
       title={
         <span className="flex items-center gap-2">
           {row.name}
-          <Badge tone={row.containers.length && running === row.containers.length ? "green" : row.containers.length ? "yellow" : "gray"}>
-            {row.containers.length ? `${running}/${row.containers.length} running` : "not deployed"}
-          </Badge>
+          {!live ? (
+            <Spinner className="size-3.5 text-zinc-400" />
+          ) : (
+            <Badge tone={row.containers.length && running === row.containers.length ? "green" : row.containers.length ? "yellow" : "gray"}>
+              {row.containers.length ? `${running}/${row.containers.length} running` : "not deployed"}
+            </Badge>
+          )}
           {!row.def && <Badge tone="yellow">no saved definition</Badge>}
         </span>
       }
@@ -134,10 +140,10 @@ function StackCard({ server, row, onEdit, onChanged }: { server: Server; row: St
         <>
           {row.def && (
             <>
-              <ActionButton size="sm" action={() => deployFromDef(server, row.name, row.def!.compose, false).then(onChanged)}>
+              <ActionButton size="sm" disabled={!live} action={() => deployFromDef(server, row.name, row.def!.compose, false).then(onChanged)}>
                 <KeyIcon /> Redeploy
               </ActionButton>
-              <ActionButton size="sm" variant="ghost" action={() => deployFromDef(server, row.name, row.def!.compose, true).then(onChanged)}>
+              <ActionButton size="sm" variant="ghost" disabled={!live} action={() => deployFromDef(server, row.name, row.def!.compose, true).then(onChanged)}>
                 Pull &amp; redeploy
               </ActionButton>
               <Button size="sm" variant="ghost" onClick={onEdit}>
@@ -149,8 +155,13 @@ function StackCard({ server, row, onEdit, onChanged }: { server: Server; row: St
             size="sm"
             variant="ghost"
             className="text-red-600 dark:text-red-400"
+            // Only decide what "remove" means once the server's state is known;
+            // otherwise a running stack could look undeployed.
+            disabled={!live}
             action={async () => {
-              if (row.containers.length) {
+              if (!row.containers.length) {
+                if (!(await confirmAction({ title: `Delete ${row.name}?`, body: "The stack is not deployed on this server. Its saved definition will be deleted from the console.", confirm: "Delete", danger: true }))) return;
+              } else {
                 const ok = await confirmAction({
                   title: `Remove stack ${row.name}?`,
                   body: (
