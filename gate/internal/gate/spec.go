@@ -451,13 +451,6 @@ func underPrefixes(p string, prefixes []string) bool {
 	return false
 }
 
-func truncate(s string, n int) string {
-	if len(s) > n {
-		return s[:n] + "…"
-	}
-	return s
-}
-
 // dockerBody converts a validated spec into a Docker Engine create request.
 func (s *ContainerSpec) dockerBody(labels map[string]string) map[string]any {
 	l := map[string]string{}

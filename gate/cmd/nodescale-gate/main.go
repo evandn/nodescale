@@ -141,15 +141,33 @@ func fixPermissions(p gate.Paths) {
 	// for defence in depth.
 	for _, dir := range []string{filepath.Dir(p.Config), p.State} {
 		_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-			if err != nil || d.IsDir() || d.Type()&os.ModeSymlink != 0 {
+			if err != nil || !d.Type().IsRegular() {
 				return nil
 			}
-			_ = os.Chown(path, 0, gid)
-			_ = os.Chmod(path, 0o660)
+			mode := os.FileMode(0o660)
+			if path == p.Identity {
+				mode = 0o640
+			}
+			fixFile(path, gid, mode)
 			return nil
 		})
 	}
-	_ = os.Chmod(p.Identity, 0o640)
+}
+
+// fixFile changes ownership and mode through a file descriptor opened with
+// O_NOFOLLOW, so a symlink swapped in after the directory walk cannot
+// redirect root's chown/chmod to another file.
+func fixFile(path string, gid int, mode os.FileMode) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
+		return
+	}
+	_ = f.Chown(0, gid)
+	_ = f.Chmod(mode)
 }
 
 func check(p gate.Paths) int {
