@@ -69,15 +69,21 @@ export async function openSealed(privateKey: CryptoKey, publicKey: string, agent
   return new TextDecoder().decode(pt);
 }
 
-/** Seals every value of KEY=value entries (already-sealed values are kept). */
+const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
+
+/**
+ * Seals the value of every KEY=value entry. Nothing is passed through: a
+ * value that already looks sealed, or an empty one, is sealed again, so text
+ * from an untrusted source (e.g. a compose file stored in the console) can
+ * never smuggle a secret out in plaintext. The gate unseals exactly once.
+ */
 export async function sealEnv(sealKey: string, agentId: string, env: string[]): Promise<string[]> {
   return Promise.all(
     env.map(async (e) => {
       const i = e.indexOf("=");
-      if (i <= 0) return e;
-      const k = e.slice(0, i);
-      const v = e.slice(i + 1);
-      return isSealed(v) || v === "" ? e : `${k}=${await seal(sealKey, agentId, v, k)}`;
+      const k = i < 0 ? e : e.slice(0, i);
+      if (i <= 0 || !ENV_KEY.test(k)) throw new Error(`invalid environment entry name "${k.slice(0, 40)}"`);
+      return `${k}=${await seal(sealKey, agentId, e.slice(i + 1), k)}`;
     }),
   );
 }

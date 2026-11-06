@@ -14,7 +14,7 @@ import {
   type Op,
   type SignedRequest,
 } from "@nodescale/protocol";
-import type { Pin } from "./vaultCrypto.ts";
+import { getPin, type Pin } from "./vaultCrypto.ts";
 import { api, ApiError, type Server } from "./api.ts";
 import { app, renewSession as renew, requireVault, sessionValid } from "./app.ts";
 import { RELAY_TAG, tailscale } from "./providers.ts";
@@ -48,6 +48,7 @@ export function ensureRelay(): Promise<void> {
       await verifyRelay(s.ips ?? []);
       return;
     }
+    if (app.get().me?.workspace.role === "member") throw new Error("The workspace relay is offline. Ask a workspace admin to open nodescale to bring it back.");
     const authKey = await tailscale.createAuthKey({ tags: [RELAY_TAG], ephemeral: true, reusable: false, expirySeconds: 300, description: "nodescale relay" });
     const r = await api.post<{ state: string; error?: string; ips?: string[] | null }>("/relay/up", { authKey });
     if (r.state !== "up") throw new Error(`Relay could not join the tailnet: ${r.error ?? r.state}`);
@@ -78,16 +79,18 @@ let verifiedRelayIp: string | null = null;
  * attaching it to a tailnet they control. Skipped without Tailscale credentials.
  */
 async function verifyRelay(ips: string[]) {
-  const ip = ips.find((a) => a.startsWith("100."));
-  if (!ip || ip === verifiedRelayIp) return;
   const v = app.get().vault;
   if (v.status !== "unlocked" || !v.data.tailscale) return;
+  const key = [...ips].sort().join(",");
+  if (ips.length && key === verifiedRelayIp) return;
+  // Fail closed: with credentials available, an unverifiable relay is refused.
+  if (!ips.length) throw new Error("The relay did not report a tailnet address; refusing to use it.");
   const devices = await tailscale.listDevices();
-  const dev = devices.find((d) => d.addresses.includes(ip));
-  if (!dev || !(dev.tags ?? []).includes(RELAY_TAG)) {
-    throw new Error(`The relay (${ip}) is not a nodescale relay in your tailnet. Ask an admin to check the workspace relay.`);
+  const dev = devices.find((d) => ips.some((ip) => d.addresses.includes(ip)));
+  if (!dev || !(dev.tags ?? []).includes(RELAY_TAG) || !ips.every((ip) => dev.addresses.includes(ip))) {
+    throw new Error(`The relay (${ips.join(", ")}) is not a nodescale relay in your tailnet. Ask an admin to check the workspace relay.`);
   }
-  verifiedRelayIp = ip;
+  verifiedRelayIp = key;
 }
 
 // One passkey prompt for any number of concurrent calls that need a session.
@@ -115,7 +118,7 @@ export interface CallOptions {
  */
 export async function callAgent<R>(server: Server, op: Op, args?: unknown, opts: CallOptions = {}): Promise<R> {
   const level = levelOf(op);
-  const pin = requireVault().pins[server.id];
+  const pin = getPin(requireVault(), server.id);
   if (level !== "public" && !pin) throw new NotPinnedError();
   const aud = level === "public" ? "*" : pin!.agentId;
   if (pin) args = await sealArgs(op, args, pin);
@@ -185,7 +188,7 @@ async function sealArgs(op: Op, args: unknown, pin: Pin): Promise<unknown> {
 
 /** Reveals a container's environment; the gate encrypts it to a key only this tab holds. */
 export async function revealEnv(server: Server, id: string): Promise<string[]> {
-  const pin = requireVault().pins[server.id];
+  const pin = getPin(requireVault(), server.id);
   if (!pin) throw new NotPinnedError();
   const reply = await replyKeyPair();
   const r = await callAgent<{ sealed: string }>(server, "containers.env", { id, replyKey: reply.publicKey });

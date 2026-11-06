@@ -1,4 +1,4 @@
-import { DOMAIN, b64, challenge, encodeSessionCert, nowSeconds, unb64, verifyAssertion, type Certificate, type Scope, type SignerKey, type Alg } from "@nodescale/protocol";
+import { DOMAIN, b64, challenge, encodeSessionCert, nowSeconds, unb64, utf8, verifyAssertion, type Certificate, type Scope, type SignerKey, type Alg } from "@nodescale/protocol";
 import { trustedRp } from "./release.ts";
 import { api, ApiError, type Me, type PasskeyInfo } from "./api.ts";
 import { createStore } from "./store.ts";
@@ -121,6 +121,11 @@ export function sessionValid(s: OpsSession | null, slack = 15): s is OpsSession 
   return !!s && s.exp - slack > nowSeconds();
 }
 
+/** Asks the new passkey to sign the registration challenge, proving it holds the key. */
+async function proveNewPasskey(rpId: string, serverChallenge: string, credentialId: string) {
+  return getAssertion({ challenge: await challenge(DOMAIN.possession, utf8(serverChallenge)), rpId, allow: [credentialId], prf: true });
+}
+
 export async function register(name: string, label: string, invite: string | null) {
   const start = await api.post<{ challengeId: string; challenge: string; user: { id: string; name: string }; rp: { id: string; name: string } }>("/auth/register/start", {
     name,
@@ -128,12 +133,15 @@ export async function register(name: string, label: string, invite: string | nul
   });
   const cred = await createPasskey(start);
   const { prfOutput, ...credential } = cred;
-  await api.post("/auth/register/finish", { challengeId: start.challengeId, credential, label });
-  // Sign in straight away (second touch). This also evaluates the PRF for
-  // authenticators that only support it during assertions.
-  await signIn({ allow: [cred.id] });
+  // Second touch: proves possession of the new key, signs in, and evaluates
+  // the PRF for authenticators that only support it during assertions.
+  const proof = await proveNewPasskey(start.rp.id, start.challenge, cred.id);
+  await api.post("/auth/register/finish", { challengeId: start.challengeId, credential, label, proof: proof.assertion });
+  const me = await api.get<Me>("/me");
+  app.set({ me });
+  await loadVault(cred.id, proof.prfOutput ?? prfOutput);
   if (app.get().vault.status === "missing") {
-    await createVault({ id: cred.id, alg: cred.alg as Alg, publicKey: cred.publicKey, label }, lastPrf ?? prfOutput);
+    await createVault({ id: cred.id, alg: cred.alg as Alg, publicKey: cred.publicKey, label }, proof.prfOutput ?? prfOutput);
   }
 }
 
@@ -331,12 +339,9 @@ export async function addPasskey(label: string) {
   const start = await api.post<{ challengeId: string; challenge: string; user: { id: string; name: string }; rp: { id: string; name: string }; exclude: string[] }>("/passkeys/start");
   const cred = await createPasskey(start);
   const { prfOutput, ...credential } = cred;
-  await api.post("/passkeys/finish", { challengeId: start.challengeId, credential, label });
-  let prf = prfOutput;
-  if (!prf && cred.prf) {
-    const got = await getAssertion({ challenge: crypto.getRandomValues(new Uint8Array(32)), rpId: me.rp.id, allow: [cred.id], prf: true });
-    prf = got.prfOutput;
-  }
+  const proof = await proveNewPasskey(me.rp.id, start.challenge, cred.id);
+  await api.post("/passkeys/finish", { challengeId: start.challengeId, credential, label, proof: proof.assertion });
+  const prf = proof.prfOutput ?? prfOutput;
   if (app.get().vault.status === "unlocked") {
     if (prf) await wrapForPasskey(cred.id, prf);
     await updateVault((d) => {

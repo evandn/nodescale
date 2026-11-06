@@ -17,7 +17,7 @@ export function TeamPage() {
   const me = app.use((s) => s.me)!;
   const members = useAsync(() => api.get<Member[]>("/workspace/members"));
   const canAdmin = me.workspace.role !== "member";
-  const invites = useAsync(async () => (canAdmin ? api.get<{ id: string; role: string; createdAt: number; expiresAt: number; usedAt: number | null }[]>("/workspace/invites") : []));
+  const invites = useAsync(async () => (canAdmin ? api.get<{ id: string; role: string; createdAt: number; expiresAt: number; usedAt: number | null; createdBy: string | null }[]>("/workspace/invites") : []));
   const [role, setRole] = useState("member");
   const [link, setLink] = useState<string | null>(null);
 
@@ -58,7 +58,7 @@ export function TeamPage() {
                 </Td>
                 <Td className="text-zinc-500">{timeAgo(m.joinedAt)}</Td>
                 <Td className="text-right">
-                  {canAdmin && m.role !== "owner" && m.id !== me.user.id && (
+                  {canAdmin && m.role !== "owner" && m.id !== me.user.id && (me.workspace.role === "owner" || m.role === "member") && (
                     <ActionButton
                       size="sm"
                       variant="ghost"
@@ -85,7 +85,7 @@ export function TeamPage() {
               <div className="flex gap-2">
                 <Select className="w-28 py-1" value={role} onChange={(e) => setRole(e.target.value)}>
                   <option value="member">member</option>
-                  <option value="admin">admin</option>
+                  {me.workspace.role === "owner" && <option value="admin">admin</option>}
                 </Select>
                 <ActionButton
                   size="sm"
@@ -112,7 +112,7 @@ export function TeamPage() {
                 {invites.data.map((i) => (
                   <li key={i.id} className="flex items-center justify-between py-2">
                     <span>
-                      <Badge>{i.role}</Badge> <span className="ml-2 text-zinc-500">created {timeAgo(i.createdAt)}</span>
+                      <Badge>{i.role}</Badge> <span className="ml-2 text-zinc-500">created {timeAgo(i.createdAt)}{i.createdBy && ` by ${i.createdBy}`}</span>
                     </span>
                     {i.usedAt ? (
                       <Badge tone="green">used {timeAgo(i.usedAt)}</Badge>

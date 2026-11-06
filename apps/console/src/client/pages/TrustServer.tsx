@@ -34,7 +34,7 @@ export function TrustServer({ server: initial, onDone }: { server: Server; onDon
   async function trust() {
     if (!found) return;
     await updateVault((d) => {
-      d.pins[server.id] = { agentId: found.agent, publicKey: found.publicKey, sealKey: found.sealKey, pinnedAt: Math.floor(Date.now() / 1000) };
+      d.pins[server.id] = { agentId: found.agent, publicKey: found.publicKey, sealKey: found.sealKey, pinnedAt: Math.floor(Date.now() / 1000), hostname: found.hostname, label: server.name };
     });
     await api.patch(`/servers/${server.id}`, { agentId: found.agent, agentPublicKey: found.publicKey });
     recordAudit("server.trust", true, found.agent, server.id);

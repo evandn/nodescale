@@ -1,6 +1,8 @@
 import { OPS, fingerprint, type Op } from "@nodescale/protocol";
 import { useEffect, useState, type ReactNode } from "react";
 import type { Server } from "../../lib/api.ts";
+import { app } from "../../lib/app.ts";
+import { getPin } from "../../lib/vaultCrypto.ts";
 import { callAgent, NotPinnedError, type CallOptions } from "../../lib/agent.ts";
 import { useAsync } from "../../lib/hooks.ts";
 import { Button, Callout, confirmAction, cx, toast } from "../../components/ui.tsx";
@@ -26,10 +28,46 @@ export function AgentError({ error, onRetry }: { error: Error; onRetry: () => vo
  */
 export async function run(server: Server, op: Op, args: unknown, describe: ReactNode, opts: CallOptions & { danger?: boolean; quiet?: boolean } = {}): Promise<boolean> {
   const admin = OPS[op].level === "admin";
-  if (admin && !(await confirmAction({ title: OPS[op].label, body: describe, confirm: "Sign with passkey", danger: opts.danger ?? /remove|prune/.test(op), passkey: true }))) return false;
+  if (
+    admin &&
+    !(await confirmAction({
+      title: OPS[op].label,
+      body: (
+        <>
+          {describe}
+          <PinnedIdentity server={server} />
+        </>
+      ),
+      confirm: "Sign with passkey",
+      danger: opts.danger ?? /remove|prune/.test(op),
+      passkey: true,
+    }))
+  )
+    return false;
   await callAgent(server, op, args, opts);
   if (!opts.quiet) toast(`${OPS[op].label}: done`, "success");
   return true;
+}
+
+/**
+ * Which server a signature is for, from your encrypted vault rather than the
+ * console. The request is addressed to this identity, so a console that
+ * swaps names between servers is visible here.
+ */
+export function PinnedIdentity({ server }: { server: Server }) {
+  const v = app.get().vault;
+  const pin = v.status === "unlocked" ? getPin(v.data, server.id) : undefined;
+  if (!pin) return null;
+  const renamed = !!pin.label && pin.label !== server.name;
+  return (
+    <div className={cx("mt-3 rounded-lg px-3 py-2 text-xs ring-1", renamed ? "bg-amber-50 ring-amber-300 dark:bg-amber-500/10" : "bg-zinc-50 ring-zinc-200 dark:bg-zinc-800 dark:ring-zinc-700")}>
+      <span className="text-zinc-500">Signed for </span>
+      <strong>{pin.label ?? server.name}</strong>
+      {pin.hostname && <span className="text-zinc-500"> · host {pin.hostname}</span>}
+      <span className="font-mono text-zinc-500"> · {pin.agentId.slice(0, 15)}…</span>
+      {renamed && <p className="mt-1 text-amber-800 dark:text-amber-300">The console now calls this server “{server.name}”. Make sure this is the server you mean.</p>}
+    </div>
+  );
 }
 
 export function Fingerprint({ publicKey, className }: { publicKey: string; className?: string }) {

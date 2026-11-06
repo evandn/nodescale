@@ -14,6 +14,8 @@ export const DOMAIN = {
   session: "nodescale/v1/session",
   sessionRequest: "nodescale/v1/session-request",
   response: "nodescale/v1/response",
+  /** Proves a newly registered passkey's private key is held by the registrant. */
+  possession: "nodescale/v1/possession",
 } as const;
 
 export type Domain = (typeof DOMAIN)[keyof typeof DOMAIN];

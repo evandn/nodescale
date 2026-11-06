@@ -31,6 +31,10 @@ export interface Pin {
   /** X25519 key that environment values are sealed to. */
   sealKey: string;
   pinnedAt: number;
+  /** Hostname reported by the server in its signed hello. */
+  hostname?: string;
+  /** The server's name when you pinned it (the console's name can change). */
+  label?: string;
 }
 
 export interface VaultData {
@@ -156,4 +160,17 @@ export function parseRecoveryKey(s: string): Uint8Array<ArrayBuffer> {
 export function generateRecoveryKey(): { bytes: Uint8Array<ArrayBuffer>; text: string } {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   return { bytes, text: formatRecoveryKey(bytes) };
+}
+
+const AGENT_ID = /^ag_[0-9a-f]{32}$/;
+
+/**
+ * Looks up a pin by server ID. Own properties only (an ID such as
+ * "constructor" must not hit Object.prototype), and the pin must be well formed.
+ */
+export function getPin(data: VaultData, serverId: string): Pin | undefined {
+  if (!Object.hasOwn(data.pins, serverId)) return undefined;
+  const p = data.pins[serverId];
+  if (!p || typeof p.agentId !== "string" || !AGENT_ID.test(p.agentId) || typeof p.publicKey !== "string" || typeof p.sealKey !== "string") return undefined;
+  return p;
 }

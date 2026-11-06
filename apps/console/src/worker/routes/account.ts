@@ -81,24 +81,38 @@ workspace.patch("/", requireRole("owner", "admin"), async (c) => {
   return c.json({ ok: true });
 });
 
+/** Pending invites created by a user stop working when they lose admin rights. */
+function revokeInvitesBy(db: D1Database, workspaceId: string, userId: string) {
+  return db.prepare("DELETE FROM invites WHERE workspace_id = ? AND created_by = ? AND used_by IS NULL").bind(workspaceId, userId);
+}
+
 workspace.patch("/members/:id", requireRole("owner"), async (c) => {
+  const u = c.get("user");
   const b = await body<{ role?: unknown }>(c);
   const role = str(b.role, "role", { pattern: /^(admin|member)$/ });
-  if (c.req.param("id") === c.get("user").id) fail(409, "you cannot change your own role");
-  await c.env.DB.prepare("UPDATE memberships SET role = ? WHERE workspace_id = ? AND user_id = ? AND role != 'owner'").bind(role, c.get("user").workspaceId, c.req.param("id")).run();
+  if (c.req.param("id") === u.id) fail(409, "you cannot change your own role");
+  const stmts = [c.env.DB.prepare("UPDATE memberships SET role = ? WHERE workspace_id = ? AND user_id = ? AND role != 'owner'").bind(role, u.workspaceId, c.req.param("id"))];
+  if (role === "member") stmts.push(revokeInvitesBy(c.env.DB, u.workspaceId, c.req.param("id")));
+  await c.env.DB.batch(stmts);
   return c.json({ ok: true });
 });
 
 workspace.delete("/members/:id", requireRole("owner", "admin"), async (c) => {
   const u = c.get("user");
   if (c.req.param("id") === u.id) fail(409, "you cannot remove yourself");
-  await c.env.DB.prepare("DELETE FROM memberships WHERE workspace_id = ? AND user_id = ? AND role != 'owner'").bind(u.workspaceId, c.req.param("id")).run();
+  // Admins may remove members; only the owner may remove admins.
+  const allowed = u.role === "owner" ? "role != 'owner'" : "role = 'member'";
+  const r = await c.env.DB.prepare(`DELETE FROM memberships WHERE workspace_id = ? AND user_id = ? AND ${allowed}`).bind(u.workspaceId, c.req.param("id")).run();
+  if (!r.meta.changes) fail(403, "you cannot remove this member");
+  await revokeInvitesBy(c.env.DB, u.workspaceId, c.req.param("id")).run();
   return c.json({ ok: true });
 });
 
 workspace.get("/invites", requireRole("owner", "admin"), async (c) => {
   const { results } = await c.env.DB.prepare(
-    "SELECT id, role, created_at AS createdAt, expires_at AS expiresAt, used_at AS usedAt FROM invites WHERE workspace_id = ? ORDER BY created_at DESC LIMIT 50",
+    `SELECT i.id, i.role, i.created_at AS createdAt, i.expires_at AS expiresAt, i.used_at AS usedAt, u.name AS createdBy
+       FROM invites i LEFT JOIN users u ON u.id = i.created_by
+      WHERE i.workspace_id = ? ORDER BY i.created_at DESC LIMIT 50`,
   )
     .bind(c.get("user").workspaceId)
     .all();
@@ -109,6 +123,7 @@ workspace.post("/invites", requireRole("owner", "admin"), async (c) => {
   const u = c.get("user");
   const b = await body<{ role?: unknown }>(c);
   const role = str(b.role ?? "member", "role", { pattern: /^(admin|member)$/ });
+  if (role === "admin" && u.role !== "owner") fail(403, "only the owner can invite admins");
   const code = randomToken(24);
   const t = now();
   await c.env.DB.prepare("INSERT INTO invites (id, workspace_id, role, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)")
@@ -133,6 +148,7 @@ audit.get("/", async (c) => {
   const before = Number(c.req.query("before") ?? "0") || Number.MAX_SAFE_INTEGER;
   const { results } = await c.env.DB.prepare(
     `SELECT a.id, a.action, a.ok, a.detail, a.request_hash AS requestHash, a.created_at AS createdAt, a.ip,
+            CASE WHEN a.request_hash IS NULL THEN 'browser' ELSE 'relay' END AS source,
             u.name AS userName, s.name AS serverName, a.server_id AS serverId
        FROM audit_events a
        LEFT JOIN users u ON u.id = a.user_id

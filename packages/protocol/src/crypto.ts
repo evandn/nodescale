@@ -85,7 +85,8 @@ export async function verifyResponse<R>(
   const ok = await crypto.subtle.verify({ name: "Ed25519" }, key, unb64(resp.signature), message(DOMAIN.response, payload));
   if (!ok) throw new ResponseVerificationError("agent response signature is invalid");
   const id = await agentIdFromKey(pub);
-  if (expect.agentId && id !== expect.agentId) {
+  // null means "public call, identity not yet known"; anything else must match.
+  if (expect.agentId !== null && id !== expect.agentId) {
     throw new ResponseVerificationError(`agent identity changed: expected ${expect.agentId}, got ${id}`);
   }
   const r = JSON.parse(fromUtf8(payload)) as ResponsePayload<R>;

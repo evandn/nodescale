@@ -34,13 +34,16 @@ describe("sealed values", () => {
     await expect(openSealed(priv, r.publicKey, goVectors.agentId, r.sealed, "other-label")).rejects.toThrow();
   });
 
-  it("round-trips and seals env values only", async () => {
+  it("seals every env value and rejects bad names", async () => {
     const server = await replyKeyPair();
-    const [plain, empty, secret] = await sealEnv(server.publicKey, "ag_x", ["A", "B=", "C=v=1"]);
-    expect(plain).toBe("A");
-    expect(empty).toBe("B=");
-    expect(secret!.startsWith("C=nsseal1.")).toBe(true);
+    const [empty, secret, prefixed] = await sealEnv(server.publicKey, "ag_x", ["B=", "C=v=1", "D=nsseal1.hunter2"]);
+    for (const e of [empty, secret, prefixed]) expect(e).toMatch(/^[A-D]=nsseal1\./);
     expect(await openSealed(server.privateKey, server.publicKey, "ag_x", secret!.slice(2), "C")).toBe("v=1");
+    // A value that merely looks sealed is sealed again, never passed through.
+    expect(await openSealed(server.privateKey, server.publicKey, "ag_x", prefixed!.slice(2), "D")).toBe("nsseal1.hunter2");
+    await expect(sealEnv(server.publicKey, "ag_x", ["=secret"])).rejects.toThrow(/invalid/);
+    await expect(sealEnv(server.publicKey, "ag_x", ["NOVALUE"])).rejects.toThrow(/invalid/);
+    await expect(sealEnv(server.publicKey, "ag_x", ["BAD KEY=x"])).rejects.toThrow(/invalid/);
   });
 });
 

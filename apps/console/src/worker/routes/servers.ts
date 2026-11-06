@@ -1,10 +1,11 @@
-import { OPS, decodePayload, requestHash, unb64, type RequestPayload, type SignedRequest } from "@nodescale/protocol";
+import { OPS, decodePayload, fromUtf8, requestHash, unb64, type RequestPayload, type SignedRequest } from "@nodescale/protocol";
 import { Hono } from "hono";
 import type { AppEnv } from "../env.ts";
 import { relayFetch, type RelayStatus } from "../relay.ts";
 import { body, fail, newId, now, optStr, str } from "../util.ts";
 import { requireRole, requireUser } from "./auth.ts";
 
+const REQUEST_KEYS = new Set(["v", "typ", "aud", "op", "args", "iat", "exp", "nonce"]);
 const TAILNET_IP = /^(100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}|fd7a:115c:a1e0:[0-9a-f:]+)$/i;
 const AGENT_ID = /^ag_[0-9a-f]{32}$/;
 const B64URL = /^[A-Za-z0-9_-]+$/;
@@ -121,10 +122,24 @@ servers.post("/:id/rpc", async (c) => {
   let payload: RequestPayload;
   let hash: string;
   try {
-    payload = decodePayload<RequestPayload>(req.payload);
-    hash = await requestHash(unb64(req.payload));
+    const bytes = unb64(req.payload);
+    payload = JSON.parse(fromUtf8(bytes)) as RequestPayload;
+    hash = await requestHash(bytes);
+    // The gate (Go) matches JSON keys case-insensitively; accept only the
+    // exact canonical form so this Worker and the gate agree on which
+    // operation is being run (and audit it correctly).
+    const keys = Object.keys(payload);
+    if (
+      typeof payload !== "object" ||
+      payload === null ||
+      typeof payload.op !== "string" ||
+      !keys.every((k) => REQUEST_KEYS.has(k)) ||
+      JSON.stringify(payload) !== fromUtf8(bytes)
+    ) {
+      throw new Error("non-canonical");
+    }
   } catch {
-    fail(400, "request payload is not valid base64url JSON");
+    fail(400, "request payload must be canonical base64url JSON");
   }
 
   const res = await relayFetch(c.env, u.workspaceId, "/v1/rpc", {
@@ -218,7 +233,14 @@ relay.get("/", async (c) => {
   return c.json((await res.json()) as RelayStatus);
 });
 
-relay.post("/up", async (c) => {
+relay.post("/down", requireRole("owner", "admin"), async (c) => {
+  const res = await relayFetch(c.env, c.get("user").workspaceId, "/v1/tailnet/down", { method: "POST", body: "{}" });
+  return new Response(res.body, { status: res.status, headers: { "Content-Type": "application/json" } });
+});
+
+// Joining the shared relay to a tailnet decides where everyone's requests go,
+// so only owners and admins may do it.
+relay.post("/up", requireRole("owner", "admin"), async (c) => {
   const u = c.get("user");
   const b = await body<{ authKey?: unknown }>(c);
   const authKey = str(b.authKey, "authKey", { max: 200, pattern: /^tskey-auth-[A-Za-z0-9-]+$/ });

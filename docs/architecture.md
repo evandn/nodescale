@@ -14,7 +14,7 @@ read your API keys or secrets, and can't touch your containers.**
 | Asset | Where it lives | What the console sees |
 | --- | --- | --- |
 | Authority over a server | Passkey public keys in `/etc/nodescale/gate.json` **on that server** | Nothing it can use |
-| Tailscale / Cloudflare tokens | Encrypted vault, decrypted only in your browser | Ciphertext |
+| Tailscale / Cloudflare tokens | Encrypted vault, decrypted only in your browser | Ciphertext at rest; **plaintext in transit** when you use provider features (see "Provider credentials") |
 | Container secrets (env values) | Your vault, then **sealed to the server's key** in the browser | Ciphertext |
 | Vault key | Derived from your passkey (WebAuthn PRF) or offline recovery key | Nothing |
 | Server identity | Ed25519 key on the server, pinned in your vault | The public key |
@@ -155,7 +155,8 @@ associated data) before signing the request. The gate decrypts it.
 - **Provider APIs**: Cloudflare and Tailscale don't allow browser CORS, so
   calls go through `/api/egress/{cloudflare,tailscale}/*`. It's a stateless
   pass-through to two fixed hosts that forwards the per-request token without
-  storing or logging it.
+  storing or logging it. A compromised console *can* read what passes through
+  it; see "Provider credentials" below.
 - **Relay**: a Cloudflare Container per workspace, running Go with an
   embedded Tailscale (`tsnet`). It joins as an **ephemeral** node tagged
   `tag:nodescale-relay` using a single-use, five-minute auth key minted in
@@ -177,7 +178,9 @@ the next section).
 
 | Attack | Why it fails |
 | --- | --- |
-| Read Tailscale/Cloudflare tokens or stack secrets | AES-GCM ciphertext; keys come from your authenticator or offline recovery key |
+| Read Tailscale/Cloudflare tokens or stack secrets **at rest** | AES-GCM ciphertext; keys come from your authenticator or offline recovery key |
+| Sign in as you with a passkey ID it copied | Registration requires proof of possession of the new key, and removed credential IDs are retired forever |
+| Make the user sign for a different server than shown | Admin dialogs show the server's identity, hostname and name from your vault pin, and warn if the console renamed it |
 | Read secrets in transit (deploys, env reveal) | Sealed to the server's X25519 key, or to a key that exists only in the tab |
 | Run, stop or deploy containers | The gate needs a passkey signature from its local trust list |
 | Add its own passkey to a server | `signers.add` is admin-only and needs a fresh passkey signature |
@@ -191,6 +194,32 @@ the next section).
 | Slip changes into a saved stack before redeploy | If the compose text differs from what you last deployed, the passkey dialog shows all of it, plus which secrets go to which service |
 | Attach the relay to a tailnet it controls | The browser checks that the relay's IP is a `tag:nodescale-relay` device in your own tailnet |
 | Phish passkeys on another domain | WebAuthn binds to the RP ID, and gates also check the origin |
+
+### Provider credentials
+
+Cloudflare and Tailscale don't accept API calls from browsers, so every
+provider call goes through the console's egress route. A console that's
+compromised **while you use provider features** can therefore capture:
+
+- the Cloudflare API token and the Tailscale OAuth client secret;
+- what the providers return: freshly minted Tailscale auth keys and
+  Cloudflare Tunnel tokens.
+
+Signed requests, server identities and sealed secrets don't depend on this,
+so captured tokens still don't give access to your containers. Their impact
+is bounded by their scope:
+
+- **Tailscale.** Only scoped OAuth clients are accepted (`auth_keys` and
+  `devices:core` for the nodescale tags). Personal API keys are refused
+  because they carry every permission, including editing the tailnet policy.
+  A leaked client can mint relay or server keys, which only reach the gate,
+  and can change those tagged devices: a denial-of-service risk.
+- **Cloudflare.** A leaked token can repoint DNS records and read tunnel
+  tokens for the zones and account it's limited to. That lets an attacker
+  receive traffic for exposed hostnames.
+
+Limit both, set expiry dates, rotate them after any suspected compromise,
+and enable the providers' own audit logs.
 
 ### The irreducible limit: the code your browser runs
 
@@ -212,9 +241,10 @@ Ways to limit this:
   lifetime and allowed scopes in `gate.json`.
 - **Admin actions always need a fresh touch**, and the server-side policy
   still forbids host escapes even for admins.
-- **Least-privilege tokens.** Use a Tailscale OAuth client with only
+- **Least-privilege tokens.** Tailscale requires an OAuth client with only
   `auth_keys` and `devices:core`, limited to the nodescale tags, and **never
-  `policy_file`**. Use a Cloudflare token limited to Tunnel and DNS edits.
+  `policy_file`**. Use a Cloudflare token limited to Tunnel and DNS edits on
+  specific zones, with an expiry date.
 - **Server-side audit** that the console can't alter.
 - **Hardening for high assurance**: put the console behind Cloudflare Access,
   restrict who can deploy (protected branches, separate Cloudflare roles),

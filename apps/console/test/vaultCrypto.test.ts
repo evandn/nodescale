@@ -49,3 +49,13 @@ describe("vault crypto", () => {
     await expect(decryptData(await importDek(dekRaw), env, "usr_2")).rejects.toThrow();
   });
 });
+
+describe("pin lookup", () => {
+  it("ignores prototype keys and malformed pins", async () => {
+    const { getPin } = await import("../src/client/lib/vaultCrypto.ts");
+    const good = { agentId: "ag_" + "a".repeat(32), publicKey: "pk", sealKey: "sk", pinnedAt: 1 };
+    const data: VaultData = { v: 1, rev: 1, signers: [], pins: { srv_1: good, srv_bad: { ...good, agentId: "nope" } } };
+    expect(getPin(data, "srv_1")).toEqual(good);
+    for (const id of ["constructor", "toString", "__proto__", "hasOwnProperty", "srv_bad", "srv_missing"]) expect(getPin(data, id)).toBeUndefined();
+  });
+});

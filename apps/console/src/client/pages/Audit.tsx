@@ -38,7 +38,10 @@ export function AuditPage() {
                   {e.detail && <span className="ml-2 max-w-md truncate text-xs text-zinc-500">{e.detail}</span>}
                 </Td>
                 <Td>{e.serverName ?? "—"}</Td>
-                <Td>{e.ok ? <Badge tone="green">ok</Badge> : <Badge tone="red">failed</Badge>}</Td>
+                <Td>
+                  {e.ok ? <Badge tone="green">ok</Badge> : <Badge tone="red">failed</Badge>}{" "}
+                  {e.source === "browser" && <Badge tone="gray">reported by browser</Badge>}
+                </Td>
               </tr>
             ))}
           </Table>

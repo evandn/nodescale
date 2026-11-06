@@ -49,12 +49,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --generate-notes --title "$TAG"
-          gh release upload "$TAG" dist/* --clobber
+          # Never replace published binaries: installs pin their hashes.
+          gh release upload "$TAG" dist/*
           {
-            echo "### Pin these hashes in the console (wrangler vars)"
+            echo "### Pin these in the console build (see docs/deployment.md)"
             echo '```'
-            echo "GATE_VERSION=$TAG"
-            echo "GATE_SHA256_AMD64=$(grep amd64 dist/SHA256SUMS | cut -d' ' -f1)"
-            echo "GATE_SHA256_ARM64=$(grep arm64 dist/SHA256SUMS | cut -d' ' -f1)"
+            echo "VITE_GATE_VERSION=$TAG"
+            echo "VITE_GATE_SHA256_AMD64=$(grep amd64 dist/SHA256SUMS | cut -d' ' -f1)"
+            echo "VITE_GATE_SHA256_ARM64=$(grep arm64 dist/SHA256SUMS | cut -d' ' -f1)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

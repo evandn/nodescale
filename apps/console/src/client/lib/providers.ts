@@ -68,7 +68,9 @@ export { RELAY_TAG, SERVER_TAG } from "./tags.ts";
 let tsToken: { forSecret: string; token: string; exp: number } | null = null;
 
 async function tailscaleAuth(c: TailscaleCreds): Promise<string> {
-  if (c.kind === "apikey") return `Bearer ${c.secret}`;
+  // Personal API keys carry every permission of their owner (including the
+  // tailnet policy); only scoped OAuth clients are accepted.
+  if (c.kind !== "oauth" || !c.clientId) throw new Error("Use a scoped Tailscale OAuth client (Settings → Integrations); API access tokens are not accepted");
   if (tsToken && tsToken.forSecret === c.secret && tsToken.exp > Date.now() + 60_000) return `Bearer ${tsToken.token}`;
   const r = await egress<{ access_token: string; expires_in: number }>("tailscale", "oauth/token", null, {
     method: "POST",

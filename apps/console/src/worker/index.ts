@@ -45,7 +45,7 @@ const api = new Hono<AppEnv>();
 api.use(async (c, next) => {
   if (c.req.method !== "GET" && c.req.method !== "HEAD") {
     if (c.req.header("origin") !== c.env.ORIGIN || c.req.header("x-nodescale") !== "1") {
-      throw new HTTPException(403, { message: "cross-site request rejected" });
+      return c.json({ error: "cross-site request rejected" }, 403, { "Cache-Control": "no-store" });
     }
   }
   await next();

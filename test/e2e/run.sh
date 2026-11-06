@@ -47,7 +47,7 @@ cd "$ROOT/apps/console"
 [ -f .dev.vars ] && mv .dev.vars .dev.vars.e2e-backup
 printf 'RELAY_SECRET=%s\nRELAY_DEV_URL=http://localhost:8080\n' "$SECRET" > .dev.vars
 npx wrangler d1 migrations apply nodescale --local --persist-to "$E2E_PERSIST" >/dev/null
-npx vite build >/dev/null
+NODESCALE_ALLOW_UNPINNED_GATE=1 npx vite build >/dev/null
 setsid npx wrangler dev --port 8787 --enable-containers=false --persist-to "$E2E_PERSIST" >"$WORK/wrangler.log" 2>&1 &
 echo $! > "$WORK/wrangler.pid"
 for _ in $(seq 1 60); do

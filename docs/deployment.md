@@ -51,7 +51,7 @@ Create an **OAuth client** (Settings → OAuth clients):
 - `auth_keys` (write), tags `tag:nodescale-server`, `tag:nodescale-relay`
 - `devices:core` (write), same tags
 
-Do **not** grant `policy_file`. Each user enters the client into their own
+Do **not** grant `policy_file`. Personal API access tokens are not accepted. Each user enters the client into their own
 encrypted vault. One client per person keeps accountability clear.
 
 ## 3. Cloudflare API token

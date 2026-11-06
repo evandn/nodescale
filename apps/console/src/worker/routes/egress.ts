@@ -54,5 +54,9 @@ egress.all("/:provider/*", async (c) => {
     const v = res.headers.get(h);
     if (v) out.set(h, v);
   }
+  // Never serve upstream HTML (or anything but JSON) as a document from
+  // the console's origin.
+  if (!/^application\/json\b/i.test(out.get("content-type") ?? "")) out.set("content-type", "text/plain; charset=utf-8");
+  out.set("Content-Disposition", "attachment");
   return new Response(res.body, { status: res.status >= 300 && res.status < 400 ? 502 : res.status, headers: out });
 });

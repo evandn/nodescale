@@ -4,7 +4,7 @@ import { api, type Member, type Server } from "../../lib/api.ts";
 import { callAgent } from "../../lib/agent.ts";
 import { timeAgo, useAsync } from "../../lib/hooks.ts";
 import { ActionButton, Badge, Button, Callout, Card, Field, KeyIcon, Modal, Select, Spinner, Table, Td, toast } from "../../components/ui.tsx";
-import { AgentError, Fingerprint, run, useAgent } from "./shared.tsx";
+import { AgentError, Fingerprint, PinnedIdentity, run, useAgent } from "./shared.tsx";
 
 export function AccessTab({ server }: { server: Server }) {
   const signers = useAgent<SignerKey[]>(server, "signers.list");
@@ -110,6 +110,7 @@ export function AccessTab({ server }: { server: Server }) {
             <p className="rounded-lg bg-zinc-100 px-4 py-3 text-center dark:bg-zinc-800">
               <Fingerprint publicKey={adding.key.publicKey} className="text-sm" />
             </p>
+            <PinnedIdentity server={server} />
             <Field label="Role on this server">
               <Select value={role} onChange={(e) => setRole(e.target.value as SignerKey["role"])}>
                 <option value="viewer">Viewer — read containers, logs and status</option>

@@ -26,7 +26,7 @@ import {
   confirmAction,
   toast,
 } from "../../components/ui.tsx";
-import { AgentError, containerName, stateTone, useAgent, type Container } from "./shared.tsx";
+import { AgentError, PinnedIdentity, containerName, stateTone, useAgent, type Container } from "./shared.tsx";
 
 const TEMPLATE = `# Docker Compose subset. Secrets: write \${NAME}; values come from your
 # encrypted vault and are sealed to this server in your browser.
@@ -170,6 +170,7 @@ function StackCard({ server, row, live, onEdit, onChanged }: { server: Server; r
                       <p>
                         Stops and removes {row.containers.length} container(s) and the stack network on {server.name}. Named volumes are kept; remove them from Networks &amp; volumes if you no longer need the data.
                       </p>
+                      <PinnedIdentity server={server} />
                     </div>
                   ),
                   confirm: "Sign with passkey",
@@ -279,6 +280,7 @@ async function deploy(server: Server, name: string, compose: string, parsed: Par
           </>
         )}
         {pull && <p className="text-xs">Images will be pulled again even if present.</p>}
+        <PinnedIdentity server={server} />
       </div>
     ),
     confirm: "Sign with passkey",

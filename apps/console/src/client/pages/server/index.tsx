@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api, type Server } from "../../lib/api.ts";
 import { app } from "../../lib/app.ts";
+import { getPin } from "../../lib/vaultCrypto.ts";
 import { useAsync } from "../../lib/hooks.ts";
 import { Link } from "../../lib/router.tsx";
 import { Badge, Callout, Code, PageHeader, ShieldIcon, Spinner, Tabs } from "../../components/ui.tsx";
@@ -27,7 +28,7 @@ const TABS: { id: Tab; label: string }[] = [
 
 export function ServerPage({ id }: { id: string }) {
   const server = useAsync(() => api.get<Server>(`/servers/${id}`), [id]);
-  const pin = app.use((s) => (s.vault.status === "unlocked" ? s.vault.data.pins[id] : undefined));
+  const pin = app.use((s) => (s.vault.status === "unlocked" ? getPin(s.vault.data, id) : undefined));
   const [tab, setTab] = useState<Tab>(() => (TABS.some((t) => t.id === location.hash.slice(1)) ? (location.hash.slice(1) as Tab) : "overview"));
 
   if (server.loading && !server.data) return <Spinner className="size-5 text-zinc-400" />;

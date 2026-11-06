@@ -1,12 +1,13 @@
 import { api, type Server } from "../lib/api.ts";
 import { callAgent } from "../lib/agent.ts";
 import { app } from "../lib/app.ts";
+import { getPin, type VaultData } from "../lib/vaultCrypto.ts";
 import { bytes, timeAgo, useAsync } from "../lib/hooks.ts";
 import { Link, navigate } from "../lib/router.tsx";
 import { Badge, Button, Empty, PageHeader, PlusIcon, RefreshIcon, ServerIcon, ShieldIcon, Spinner } from "../components/ui.tsx";
 import { Meter, uptime, type Container, type HostInfo } from "./server/shared.tsx";
 
-const NO_PINS = {} as Record<string, { agentId: string }>;
+const NO_PINS: VaultData["pins"] = {};
 
 export function ServersPage() {
   const me = app.use((s) => s.me)!;
@@ -51,9 +52,10 @@ export function ServersPage() {
         </Empty>
       ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {data.map((s) => (
-            <ServerCard key={s.id} server={s} pinned={!!pins[s.id]} mismatch={!!pins[s.id] && !!s.agentId && pins[s.id]!.agentId !== s.agentId} />
-          ))}
+          {data.map((s) => {
+            const pin = getPin({ pins } as VaultData, s.id);
+            return <ServerCard key={s.id} server={s} pinned={!!pin} mismatch={!!pin && !!s.agentId && pin.agentId !== s.agentId} />;
+          })}
         </div>
       )}
     </>

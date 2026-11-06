@@ -41,35 +41,28 @@ function Integrations() {
   return (
     <div className="space-y-6">
       <Callout>
-        Credentials are encrypted in this browser with your vault key before they are saved. The console stores only ciphertext and relays API calls without keeping the token. Scope tokens narrowly: nodescale never needs permission to edit your tailnet policy.
+        Credentials are encrypted in this browser with your vault key before they are saved, so the console stores only ciphertext. Cloudflare and Tailscale do not accept calls from browsers, so when you use these features the token passes through the console's API proxy: a compromised console could capture it at that moment. Scope both narrowly as described below, set expiry dates, and rotate them if you suspect a compromise.
       </Callout>
       <div className="grid gap-6 lg:grid-cols-2">
         <Card title="Tailscale" actions={vault.tailscale && <Badge tone="green">configured</Badge>}>
           <div className="space-y-4">
-            <Field label="Credential type">
-              <Select value={ts.kind} onChange={(e) => setTs({ ...ts, kind: e.target.value as TailscaleCreds["kind"] })}>
-                <option value="oauth">OAuth client (recommended)</option>
-                <option value="apikey">API access token</option>
-              </Select>
-            </Field>
-            {ts.kind === "oauth" && (
-              <Field label="Client ID">
-                <Input value={ts.clientId ?? ""} onChange={(e) => setTs({ ...ts, clientId: e.target.value.trim() })} autoComplete="off" />
-              </Field>
+            {vault.tailscale?.kind === "apikey" && (
+              <Callout tone="yellow">
+                Personal API access tokens are no longer accepted: they carry all of your permissions, including editing the tailnet policy. Replace it with a scoped OAuth client.
+              </Callout>
             )}
+            <Field label="OAuth client ID">
+              <Input value={ts.clientId ?? ""} onChange={(e) => setTs({ ...ts, kind: "oauth", clientId: e.target.value.trim() })} autoComplete="off" />
+            </Field>
             <Field
-              label={ts.kind === "oauth" ? "Client secret" : "API access token"}
+              label="OAuth client secret"
               hint={
-                ts.kind === "oauth" ? (
-                  <>
-                    Scopes: <Code>auth_keys</Code> (write) and <Code>devices:core</Code> (write), tags <Code>tag:nodescale-server</Code> and <Code>tag:nodescale-relay</Code>. Do <strong>not</strong> grant <Code>policy_file</Code>.
-                  </>
-                ) : (
-                  "API tokens carry all of your permissions and expire after at most 90 days. Prefer an OAuth client."
-                )
+                <>
+                  Scopes: <Code>auth_keys</Code> (write) and <Code>devices:core</Code> (write), tags <Code>tag:nodescale-server</Code> and <Code>tag:nodescale-relay</Code> only. Do <strong>not</strong> grant <Code>policy_file</Code>.
+                </>
               }
             >
-              <Input type="password" value={ts.secret} onChange={(e) => setTs({ ...ts, secret: e.target.value.trim() })} autoComplete="off" />
+              <Input type="password" value={ts.kind === "oauth" ? ts.secret : ""} onChange={(e) => setTs({ ...ts, kind: "oauth", secret: e.target.value.trim() })} autoComplete="off" />
             </Field>
             <Field label="Tailnet" hint="Use “-” for the default tailnet of the credential.">
               <Input value={ts.tailnet} onChange={(e) => setTs({ ...ts, tailnet: e.target.value.trim() || "-" })} />
@@ -77,7 +70,7 @@ function Integrations() {
             <div className="flex gap-2">
               <ActionButton
                 variant="primary"
-                disabled={!ts.secret}
+                disabled={ts.kind !== "oauth" || !ts.secret || !ts.clientId}
                 action={async () => {
                   const devices = await tailscale.listDevices(ts);
                   await updateVault((d) => {

@@ -115,7 +115,12 @@ async function verifyRegistration(env: Env, cred: RegistrationCredential, expect
   if (![ALG.ES256, ALG.EdDSA, ALG.RS256].includes(cred.alg as Alg)) fail(400, "unsupported passkey algorithm");
 
   const cdj = unb64(str(cred.clientDataJSON, "clientDataJSON", { max: 4000, pattern: B64URL }));
-  const cd = JSON.parse(fromUtf8(cdj)) as { type?: string; challenge?: string; origin?: string; crossOrigin?: boolean };
+  let cd: { type?: string; challenge?: string; origin?: string; crossOrigin?: boolean };
+  try {
+    cd = JSON.parse(fromUtf8(cdj));
+  } catch {
+    fail(400, "clientDataJSON is not valid JSON");
+  }
   if (cd.type !== "webauthn.create") fail(400, "unexpected clientData type");
   if (cd.challenge !== expected) fail(400, "challenge mismatch");
   if (cd.origin !== env.ORIGIN || cd.crossOrigin) fail(400, "origin mismatch");
@@ -145,6 +150,57 @@ async function verifyRegistration(env: Env, cred: RegistrationCredential, expect
   return { id: b64(unb64(cred.id)), signCount: new DataView(authData.buffer, authData.byteOffset + 33, 4).getUint32(0) };
 }
 
+/**
+ * With attestation "none", nothing in a registration is signed by the new
+ * key. Require an assertion by that key over the registration challenge so a
+ * client cannot register a credential ID and public key it does not hold.
+ */
+async function verifyPossession(env: Env, cred: { id: string; publicKey: string; alg: number }, proof: Assertion | undefined, serverChallenge: string) {
+  if (!proof || typeof proof.credentialId !== "string") fail(400, "proof of possession is required");
+  let id: string;
+  try {
+    id = b64(unb64(proof.credentialId));
+  } catch {
+    fail(400, "invalid proof");
+  }
+  if (id !== cred.id) fail(400, "proof was made by a different passkey");
+  try {
+    await verifyAssertion({
+      rp: { id: env.RP_ID, origins: [env.ORIGIN] },
+      alg: cred.alg as Alg,
+      publicKey: cred.publicKey,
+      assertion: proof,
+      challenge: await payloadChallenge(DOMAIN.possession, utf8(serverChallenge)),
+      requireUserVerification: true,
+    });
+  } catch (e) {
+    fail(400, `proof of possession failed: ${(e as Error).message}`);
+  }
+}
+
+async function ensureNotRetired(env: Env, id: string) {
+  const r = await env.DB.prepare("SELECT 1 FROM retired_credentials WHERE id = ?").bind(id).first();
+  if (r) fail(409, "this passkey was removed from nodescale before and cannot be registered again; create a new passkey");
+}
+
+async function startSession(c: Context<AppEnv>, userId: string, credentialId: string) {
+  const token = randomToken(32);
+  const t = now();
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM sessions WHERE user_id = ? AND expires_at < ?").bind(userId, t),
+    c.env.DB.prepare("INSERT INTO sessions (id, user_id, credential_id, created_at, expires_at, user_agent, ip) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(
+      await hashToken(token),
+      userId,
+      credentialId,
+      t,
+      t + SESSION_TTL,
+      (c.req.header("user-agent") ?? "").slice(0, 300),
+      clientIp(c),
+    ),
+  ]);
+  setCookie(c, SESSION_COOKIE, token, { path: "/", secure: true, httpOnly: true, sameSite: "Strict", maxAge: SESSION_TTL });
+}
+
 function rpInfo(env: Env) {
   return { id: env.RP_ID, name: "nodescale" };
 }
@@ -158,7 +214,12 @@ function rpInfo(env: Env) {
 async function verifyLogin(c: Context<AppEnv>, challengeId: unknown, certificate: { payload?: unknown; assertion?: Assertion }) {
   const ch = await takeChallenge(c.env, challengeId, "login");
   const certBytes = unb64(str(certificate?.payload, "certificate.payload", { max: 4000, pattern: B64URL }));
-  const cert = JSON.parse(fromUtf8(certBytes)) as SessionCertPayload;
+  let cert: SessionCertPayload;
+  try {
+    cert = JSON.parse(fromUtf8(certBytes)) as SessionCertPayload;
+  } catch {
+    fail(400, "certificate is not valid JSON");
+  }
   const t = now();
   if (cert.v !== 1 || cert.typ !== "nodescale.session") fail(400, "invalid certificate");
   if (cert.nonce !== ch.challenge) fail(400, "certificate is not bound to this sign-in");
@@ -190,21 +251,8 @@ async function verifyLogin(c: Context<AppEnv>, challengeId: unknown, certificate
   // suggests a cloned authenticator.
   if (cred.sign_count > 0 && verified.signCount <= cred.sign_count) fail(401, "passkey counter regressed; possible cloned authenticator");
 
-  const token = randomToken(32);
-  await c.env.DB.batch([
-    c.env.DB.prepare("UPDATE credentials SET sign_count = ?, last_used_at = ? WHERE id = ?").bind(verified.signCount, t, cred.id),
-    c.env.DB.prepare("DELETE FROM sessions WHERE user_id = ? AND expires_at < ?").bind(cred.user_id, t),
-    c.env.DB.prepare("INSERT INTO sessions (id, user_id, credential_id, created_at, expires_at, user_agent, ip) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(
-      await hashToken(token),
-      cred.user_id,
-      cred.id,
-      t,
-      t + SESSION_TTL,
-      (c.req.header("user-agent") ?? "").slice(0, 300),
-      clientIp(c),
-    ),
-  ]);
-  setCookie(c, SESSION_COOKIE, token, { path: "/", secure: true, httpOnly: true, sameSite: "Strict", maxAge: SESSION_TTL });
+  await c.env.DB.prepare("UPDATE credentials SET sign_count = ?, last_used_at = ? WHERE id = ?").bind(verified.signCount, t, cred.id).run();
+  await startSession(c, cred.user_id, cred.id);
   return cred.user_id;
 }
 
@@ -234,9 +282,11 @@ auth.post("/register/start", async (c) => {
 
 auth.post("/register/finish", async (c) => {
   await rateLimit(c);
-  const b = await body<{ challengeId?: unknown; credential?: RegistrationCredential; label?: unknown }>(c);
+  const b = await body<{ challengeId?: unknown; credential?: RegistrationCredential; label?: unknown; proof?: Assertion }>(c);
   const ch = await takeChallenge(c.env, b.challengeId, "register");
   const cred = await verifyRegistration(c.env, b.credential!, ch.challenge);
+  await verifyPossession(c.env, { id: cred.id, publicKey: b.credential!.publicKey, alg: b.credential!.alg }, b.proof, ch.challenge);
+  await ensureNotRetired(c.env, cred.id);
   const label = optStr(b.label, "label", { max: 80 }) ?? "Passkey";
   const data = JSON.parse(ch.data ?? "{}") as { name: string; invite: string | null };
   const userId = ch.user_id!;
@@ -272,6 +322,9 @@ auth.post("/register/finish", async (c) => {
     );
   }
   await c.env.DB.batch(stmts);
+  // The proof of possession was made with user verification by the new
+  // passkey, so it also signs the user in.
+  await startSession(c, userId, cred.id);
   return c.json({ userId, credentialId: cred.id });
 });
 
@@ -319,10 +372,12 @@ passkeys.post("/start", async (c) => {
 
 passkeys.post("/finish", async (c) => {
   const u = c.get("user");
-  const b = await body<{ challengeId?: unknown; credential?: RegistrationCredential; label?: unknown }>(c);
+  const b = await body<{ challengeId?: unknown; credential?: RegistrationCredential; label?: unknown; proof?: Assertion }>(c);
   const ch = await takeChallenge(c.env, b.challengeId, "add-passkey");
   if (ch.user_id !== u.id) fail(403, "challenge belongs to another user");
   const cred = await verifyRegistration(c.env, b.credential!, ch.challenge);
+  await verifyPossession(c.env, { id: cred.id, publicKey: b.credential!.publicKey, alg: b.credential!.alg }, b.proof, ch.challenge);
+  await ensureNotRetired(c.env, cred.id);
   await c.env.DB.prepare(
     "INSERT INTO credentials (id, user_id, public_key, alg, label, transports, prf, sign_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
@@ -339,11 +394,17 @@ passkeys.patch("/:id", async (c) => {
 
 passkeys.delete("/:id", async (c) => {
   const u = c.get("user");
-  const n = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM credentials WHERE user_id = ?").bind(u.id).first<{ n: number }>();
-  if ((n?.n ?? 0) <= 1) fail(409, "you cannot remove your only passkey");
+  const id = c.req.param("id");
+  // One statement, so two concurrent deletions cannot remove the last passkey.
+  const r = await c.env.DB.prepare(
+    "DELETE FROM credentials WHERE id = ? AND user_id = ? AND (SELECT COUNT(*) FROM credentials WHERE user_id = ?) > 1",
+  )
+    .bind(id, u.id, u.id)
+    .run();
+  if (!r.meta.changes) fail(409, "you cannot remove your only passkey");
   await c.env.DB.batch([
-    c.env.DB.prepare("DELETE FROM credentials WHERE id = ? AND user_id = ?").bind(c.req.param("id"), u.id),
-    c.env.DB.prepare("DELETE FROM sessions WHERE credential_id = ? AND user_id = ?").bind(c.req.param("id"), u.id),
+    c.env.DB.prepare("INSERT OR IGNORE INTO retired_credentials (id, retired_at) VALUES (?, ?)").bind(id, now()),
+    c.env.DB.prepare("DELETE FROM sessions WHERE credential_id = ? AND user_id = ?").bind(id, u.id),
   ]);
   return c.json({ ok: true });
 });

@@ -98,6 +98,8 @@ export interface AuditEvent {
   userName: string | null;
   serverName: string | null;
   serverId: string | null;
+  /** "relay" = recorded by the console while relaying; "browser" = reported by a client. */
+  source: "relay" | "browser";
 }
 
 export function recordAudit(action: string, ok: boolean, detail?: string, serverId?: string) {

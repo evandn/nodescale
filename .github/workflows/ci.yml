@@ -22,6 +22,8 @@ jobs:
       - run: pnpm -r typecheck
       - run: pnpm -r test
       - run: pnpm --filter @nodescale/console build
+        env:
+          NODESCALE_ALLOW_UNPINNED_GATE: "1"
 
   gate:
     runs-on: ubuntu-latest
@@ -85,7 +87,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: npm install -g playwright@1 && playwright install --with-deps chromium
       - run: docker pull alpine:3.20 && docker pull nginx:alpine
-      - run: mkdir -p e2e-out && sudo -E env "PATH=$PATH" NODE_PATH="$(npm root -g)" E2E_OUT="$PWD/e2e-out" sh test/e2e/run.sh
+      - run: mkdir -p e2e-out && NODESCALE_ALLOW_UNPINNED_GATE=1 sudo -E env "PATH=$PATH" NODE_PATH="$(npm root -g)" E2E_OUT="$PWD/e2e-out" sh test/e2e/run.sh
       - if: always()
         uses: actions/upload-artifact@v4
         with:
