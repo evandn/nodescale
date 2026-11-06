@@ -343,23 +343,31 @@ func (g *Gate) withDeployLock(fn func() error) error {
 // exists (possibly created outside nodescale) before starting it, running
 // commands in it, or changing its restart policy.
 func (g *Gate) existingPolicy(ctx context.Context, id string) error {
+	return g.existingPolicyDepth(ctx, id, 0)
+}
+
+func (g *Gate) existingPolicyDepth(ctx context.Context, id string, depth int) error {
 	var c struct {
 		Name       string `json:"Name"`
 		HostConfig struct {
-			Privileged   bool           `json:"Privileged"`
-			NetworkMode  string         `json:"NetworkMode"`
-			PidMode      string         `json:"PidMode"`
-			IpcMode      string         `json:"IpcMode"`
-			UTSMode      string         `json:"UTSMode"`
-			UsernsMode   string         `json:"UsernsMode"`
-			CgroupnsMode string         `json:"CgroupnsMode"`
-			CapAdd       []string       `json:"CapAdd"`
-			SecurityOpt  []string       `json:"SecurityOpt"`
-			Devices      []any          `json:"Devices"`
-			PortBindings map[string]any `json:"PortBindings"`
+			Privileged        bool           `json:"Privileged"`
+			NetworkMode       string         `json:"NetworkMode"`
+			PidMode           string         `json:"PidMode"`
+			IpcMode           string         `json:"IpcMode"`
+			UTSMode           string         `json:"UTSMode"`
+			UsernsMode        string         `json:"UsernsMode"`
+			CapAdd            []string       `json:"CapAdd"`
+			SecurityOpt       []string       `json:"SecurityOpt"`
+			Devices           []any          `json:"Devices"`
+			DeviceCgroupRules []string       `json:"DeviceCgroupRules"`
+			DeviceRequests    []any          `json:"DeviceRequests"`
+			PortBindings      map[string]any `json:"PortBindings"`
+			MaskedPaths       []string       `json:"MaskedPaths"`
+			ReadonlyPaths     []string       `json:"ReadonlyPaths"`
 		} `json:"HostConfig"`
 		Mounts []struct {
 			Type   string `json:"Type"`
+			Name   string `json:"Name"`
 			Source string `json:"Source"`
 		} `json:"Mounts"`
 	}
@@ -379,15 +387,23 @@ func (g *Gate) existingPolicy(ctx context.Context, id string) error {
 	if h.Privileged && !pol.AllowPrivileged {
 		return deny("privileged")
 	}
-	if !pol.AllowHostNamespaces {
+	for _, m := range []string{h.NetworkMode, h.PidMode, h.IpcMode, h.UTSMode, h.UsernsMode} {
 		// CgroupnsMode is not checked: "host" is Docker's default on cgroup v1.
-		for _, m := range []string{h.NetworkMode, h.PidMode, h.IpcMode, h.UTSMode, h.UsernsMode} {
-			if m == "host" {
-				return deny("host namespace")
+		if m == "host" && !pol.AllowHostNamespaces {
+			return deny("host namespace")
+		}
+		// Sharing another container's namespace inherits that container's
+		// privileges, so the target must satisfy the policy too.
+		if target, ok := strings.CutPrefix(m, "container:"); ok {
+			if depth >= 3 {
+				return deny("nested container namespaces")
+			}
+			if err := g.existingPolicyDepth(ctx, target, depth+1); err != nil {
+				return deny("shares namespaces with a container that does not satisfy the policy")
 			}
 		}
 	}
-	if len(h.Devices) > 0 && !pol.AllowDevices {
+	if (len(h.Devices) > 0 || len(h.DeviceCgroupRules) > 0 || len(h.DeviceRequests) > 0) && !pol.AllowDevices {
 		return deny("devices")
 	}
 	if len(h.PortBindings) > 0 && !pol.AllowPublishedPorts {
@@ -406,9 +422,43 @@ func (g *Gate) existingPolicy(ctx context.Context, id string) error {
 			}
 		}
 	}
+	// Docker masks parts of /proc for unprivileged containers; empty lists
+	// mean e.g. /proc/sys is writable.
+	if !h.Privileged && !pol.AllowPrivileged && (len(h.MaskedPaths) == 0 || len(h.ReadonlyPaths) == 0) {
+		return deny("unmasked /proc paths")
+	}
 	for _, m := range c.Mounts {
-		if m.Type == "bind" && (slices.Contains(protectedTargets, m.Source) || !underPrefixes(m.Source, pol.BindMountPrefixes)) {
-			return deny("bind mount from " + m.Source)
+		switch m.Type {
+		case "bind":
+			if slices.Contains(protectedTargets, m.Source) || !underPrefixes(m.Source, pol.BindMountPrefixes) {
+				return deny("bind mount from " + m.Source)
+			}
+		case "volume":
+			if err := g.checkVolume(ctx, m.Name, pol); err != nil {
+				return deny("volume " + m.Name)
+			}
+		}
+	}
+	return nil
+}
+
+// checkVolume refuses volumes that are really host binds or use another
+// driver: a local volume with "o=bind,device=/" mounts the host's root.
+func (g *Gate) checkVolume(ctx context.Context, name string, pol ContainerPolicy) error {
+	v, err := g.docker.InspectVolume(ctx, name)
+	if err != nil {
+		return err
+	}
+	if v == nil {
+		return nil // Docker will create a plain local volume
+	}
+	if v.Driver != "local" && !pol.AllowPrivileged {
+		return denied("volume %s uses driver %s", name, v.Driver)
+	}
+	if dev := v.Options["device"]; dev != "" || strings.Contains(v.Options["o"], "bind") {
+		src, err := resolveBindSource(dev)
+		if err != nil || slices.Contains(protectedTargets, src) || !underPrefixes(src, pol.BindMountPrefixes) {
+			return denied("volume %s is backed by host path %q", name, dev)
 		}
 	}
 	return nil
@@ -639,6 +689,14 @@ func (g *Gate) ensureNetworks(ctx context.Context, names []string, labels map[st
 // createContainer creates (and optionally starts) a container from a
 // validated spec.
 func (g *Gate) createContainer(ctx context.Context, s *ContainerSpec, labels map[string]string) (string, error) {
+	pol := g.cfg.Policy.withDefaults().Containers
+	for _, m := range s.Mounts {
+		if m.Type == "volume" {
+			if err := g.checkVolume(ctx, m.Source, pol); err != nil {
+				return "", err
+			}
+		}
+	}
 	if _, err := g.ensureImage(ctx, s.Image, s.Pull); err != nil {
 		return "", err
 	}

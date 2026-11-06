@@ -708,3 +708,31 @@ func (c *Client) RemoveVolume(ctx context.Context, name string, force bool) erro
 func (c *Client) DiskUsage(ctx context.Context) (json.RawMessage, error) {
 	return c.Raw(ctx, http.MethodGet, "/system/df", nil, nil)
 }
+
+// NetworkLabels returns a network's labels.
+func (c *Client) NetworkLabels(ctx context.Context, name string) (map[string]string, error) {
+	var v struct {
+		Labels map[string]string `json:"Labels"`
+	}
+	err := c.json(ctx, http.MethodGet, "/networks/"+url.PathEscape(name), nil, nil, &v)
+	return v.Labels, err
+}
+
+// VolumeInfo is the subset of a volume's inspect document used for policy.
+type VolumeInfo struct {
+	Driver  string            `json:"Driver"`
+	Options map[string]string `json:"Options"`
+}
+
+// InspectVolume returns a volume's driver and options, or nil if it does not exist.
+func (c *Client) InspectVolume(ctx context.Context, name string) (*VolumeInfo, error) {
+	var v VolumeInfo
+	err := c.json(ctx, http.MethodGet, "/volumes/"+url.PathEscape(name), nil, nil, &v)
+	if IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}

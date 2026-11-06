@@ -120,14 +120,13 @@ func (g *Gate) applyStack(ctx context.Context, st StackSpec, seen map[string]boo
 		return nil, err
 	}
 	byService := map[string]docker.ContainerSummary{}
-	mine := map[string]bool{}
 	for _, c := range existing {
 		byService[c.Labels[LabelService]] = c
-		mine[c.ID] = true
 	}
-	// This stack's own containers are replaced by the new spec, which is
-	// checked against itself; everything else on the host must not overlap.
-	others, err := g.otherBinds(ctx, mine)
+	// Check against every container on the host, including this stack's
+	// current ones: they keep running while new services start, so an old
+	// service could still plant a symlink under a new service's bind.
+	others, err := g.otherBinds(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -206,6 +205,9 @@ func (g *Gate) removeStack(ctx context.Context, name string, volumes bool) ([]St
 			return results, err
 		}
 		results = append(results, StackResult{Service: c.Labels[LabelService], Action: "removed", ID: c.ID})
+	}
+	if labels, err := g.docker.NetworkLabels(ctx, stackNetwork(name)); err == nil && labels[LabelStack] != name {
+		return results, nil // not created for this stack; leave it alone
 	}
 	if err := g.docker.RemoveNetwork(ctx, stackNetwork(name)); err != nil && !docker.IsNotFound(err) {
 		return results, fmt.Errorf("remove network: %w", err)

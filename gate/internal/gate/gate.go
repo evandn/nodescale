@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -120,7 +121,7 @@ func (g *Gate) Handle(ctx context.Context, raw []byte) []byte {
 	now := g.opts.Now()
 	var sr protocol.SignedRequest
 	if err := json.Unmarshal(raw, &sr); err != nil {
-		return unsignedError("", protocol.Errorf(protocol.CodeBadRequest, "request must be JSON"))
+		return UnsignedError("", protocol.Errorf(protocol.CodeBadRequest, "request must be JSON"))
 	}
 	reqHash := ""
 	if p, err := protocol.UnB64(sr.Payload); err == nil {
@@ -133,7 +134,7 @@ func (g *Gate) Handle(ctx context.Context, raw []byte) []byte {
 		// reach the gate could fill the log) nor signed: a signed "rejected"
 		// bound to a genuine request could be shown to the user while the
 		// relay submits the real request later.
-		return unsignedError(reqHash, perr)
+		return UnsignedError(reqHash, perr)
 	}
 
 	result, err := g.dispatch(ctx, v)
@@ -189,7 +190,7 @@ func (g *Gate) Respond(reqHash string, result any, perr *protocol.Error) []byte 
 }
 
 // unsignedError reports a rejection that the gate does not vouch for.
-func unsignedError(reqHash string, perr *protocol.Error) []byte {
+func UnsignedError(reqHash string, perr *protocol.Error) []byte {
 	payload, _ := json.Marshal(protocol.Response{V: protocol.Version, Typ: protocol.TypResponse, Req: reqHash, Error: perr})
 	out, _ := json.Marshal(protocol.SignedResponse{Payload: protocol.B64(payload)})
 	return out
@@ -210,26 +211,54 @@ type auditEntry struct {
 	Error  string          `json:"error,omitempty"`
 }
 
-const maxAuditBytes = 20 << 20
+const (
+	maxAuditBytes = 20 << 20
+	maxAuditArgs  = 4 << 10
+)
 
 // audit appends an entry to the server-side audit log. It lives in a
 // directory only root and the setgid gate can reach, so neither the console
 // nor the "nodescale" SSH user can alter it.
 func (g *Gate) audit(e auditEntry) {
+	if len(e.Args) > maxAuditArgs {
+		h := sha256.Sum256(e.Args)
+		e.Args, _ = json.Marshal(map[string]any{"truncated": len(e.Args), "sha256": protocol.B64(h[:])})
+	}
+	if len(e.Error) > 1024 {
+		e.Error = e.Error[:1024]
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(e)
 	path := g.opts.Paths.auditPath()
-	b, _ := json.Marshal(e)
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o660)
-	if err != nil {
+	for attempt := 0; attempt < 3; attempt++ {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o660)
+		if err != nil {
+			return
+		}
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+			f.Close()
+			return
+		}
+		// Another process may have rotated the file while we waited.
+		fst, err1 := f.Stat()
+		pst, err2 := os.Stat(path)
+		if err1 != nil || err2 != nil || !os.SameFile(fst, pst) {
+			f.Close()
+			continue
+		}
+		if fst.Size() > maxAuditBytes {
+			// Keep every rotated file (root's logrotate can prune them);
+			// the gate never deletes history.
+			_ = os.Rename(path, fmt.Sprintf("%s.%d", path, time.Now().UnixNano()))
+			f.Close()
+			continue
+		}
+		_, _ = f.Write(buf.Bytes())
+		f.Close()
 		return
 	}
-	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err == nil {
-		defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	}
-	if st, err := f.Stat(); err == nil && st.Size() > maxAuditBytes {
-		_ = os.Rename(path, path+".1")
-	}
-	_, _ = f.Write(append(b, '\n'))
 }
 
 // redact replaces environment variable values ("KEY=value" strings inside any

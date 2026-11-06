@@ -75,7 +75,7 @@ func shell() int {
 	}
 	var out []byte
 	if len(req) > gate.MaxRequestBytes {
-		out = g.Respond("", nil, protocol.Errorf(protocol.CodeBadRequest, "request too large"))
+		out = gate.UnsignedError("", protocol.Errorf(protocol.CodeBadRequest, "request too large"))
 	} else {
 		ctx, cancel := context.WithTimeout(context.Background(), 14*time.Minute)
 		defer cancel()

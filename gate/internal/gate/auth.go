@@ -3,7 +3,12 @@ package gate
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/evandn/nodescale/gate/internal/protocol"
@@ -102,16 +107,165 @@ type Verified struct {
 }
 
 func decodeStrict(b []byte, v any) error {
+	// encoding/json matches keys case-insensitively and lets duplicates
+	// overwrite each other; check the exact, case-sensitive key set first so
+	// this parser and JavaScript's JSON.parse always agree on the meaning.
+	if err := checkKeys(b, reflect.TypeOf(v)); err != nil {
+		return err
+	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
-	return dec.Decode(v)
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("unexpected data after JSON value")
+	}
+	return nil
 }
+
+// exactKeys rejects objects with keys outside the allowed set, compared
+// case-sensitively. encoding/json matches field names case-insensitively, so
+// without this {"op":"containers.list","Op":"signers.add"} would be read as
+// signers.add here but as containers.list by JavaScript (e.g. the console's
+// audit log). It also rejects duplicate keys.
+func exactKeys(b []byte, allowed ...string) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return errors.New("payload must be a JSON object")
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		k, _ := tok.(string)
+		if !slices.Contains(allowed, k) {
+			return fmt.Errorf("unexpected field %q", k)
+		}
+		if seen[k] {
+			return fmt.Errorf("duplicate field %q", k)
+		}
+		seen[k] = true
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var rawMessageType = reflect.TypeOf(json.RawMessage(nil))
+
+// jsonFields maps exact JSON names to field types, including embedded structs.
+func jsonFields(t reflect.Type, out map[string]reflect.Type) {
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		tag := f.Tag.Get("json")
+		name, _, _ := strings.Cut(tag, ",")
+		if tag == "-" || (!f.IsExported() && !f.Anonymous) {
+			continue
+		}
+		if f.Anonymous && name == "" && f.Type.Kind() == reflect.Struct {
+			jsonFields(f.Type, out)
+			continue
+		}
+		if name == "" {
+			name = f.Name
+		}
+		out[name] = f.Type
+	}
+}
+
+// checkKeys walks raw JSON alongside the Go type it will be decoded into and
+// rejects keys that are unknown, differ in case from the field's name, or
+// repeat.
+func checkKeys(raw []byte, t reflect.Type) error {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t == rawMessageType {
+		return nil
+	}
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	switch t.Kind() {
+	case reflect.Struct:
+		fields := map[string]reflect.Type{}
+		jsonFields(t, fields)
+		return walkObject(raw, func(k string, v []byte) error {
+			ft, ok := fields[k]
+			if !ok {
+				return fmt.Errorf("unexpected field %q", k)
+			}
+			return checkKeys(v, ft)
+		})
+	case reflect.Map:
+		return walkObject(raw, func(_ string, v []byte) error { return checkKeys(v, t.Elem()) })
+	case reflect.Slice, reflect.Array:
+		if raw[0] != '[' {
+			return nil // type errors are reported by the decoder
+		}
+		var items []json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return err
+		}
+		for _, it := range items {
+			if err := checkKeys(it, t.Elem()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func walkObject(raw []byte, fn func(k string, v []byte) error) error {
+	if raw[0] != '{' {
+		return nil // type errors are reported by the decoder
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if _, err := dec.Token(); err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		k, _ := tok.(string)
+		if seen[k] {
+			return fmt.Errorf("duplicate field %q", k)
+		}
+		seen[k] = true
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return err
+		}
+		if err := fn(k, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var (
+	requestKeys = []string{"v", "typ", "aud", "op", "args", "iat", "exp", "nonce"}
+	certKeys    = []string{"v", "typ", "key", "aud", "scope", "iat", "exp", "nonce"}
+)
 
 // verify authenticates and authorises a signed request.
 func (g *Gate) verify(sr *protocol.SignedRequest, now time.Time) (*Verified, *protocol.Error) {
 	payload, err := protocol.UnB64(sr.Payload)
 	if err != nil || len(payload) > 512<<10 {
 		return nil, protocol.Errorf(protocol.CodeBadRequest, "payload must be base64url JSON under 512 KiB")
+	}
+	if err := exactKeys(payload, requestKeys...); err != nil {
+		return nil, protocol.Errorf(protocol.CodeBadRequest, "payload: %v", err)
 	}
 	var req protocol.Request
 	if err := decodeStrict(payload, &req); err != nil {
@@ -185,6 +339,9 @@ func (g *Gate) verify(sr *protocol.SignedRequest, now time.Time) (*Verified, *pr
 		certPayload, err := protocol.UnB64(c.Payload)
 		if err != nil || len(certPayload) > 16<<10 {
 			return nil, protocol.Errorf(protocol.CodeBadRequest, "invalid session certificate encoding")
+		}
+		if err := exactKeys(certPayload, certKeys...); err != nil {
+			return nil, protocol.Errorf(protocol.CodeBadRequest, "session certificate: %v", err)
 		}
 		var cert protocol.SessionCert
 		if err := decodeStrict(certPayload, &cert); err != nil {

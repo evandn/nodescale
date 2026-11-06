@@ -464,3 +464,14 @@ func TestSecretNotEchoedForBadName(t *testing.T) {
 		t.Fatal("decrypted value leaked")
 	}
 }
+
+func TestCaseVariantKeysRejected(t *testing.T) {
+	h := newHarness(t)
+	// Go's JSON decoding is case-insensitive; a payload that JavaScript reads
+	// as a read must not run as signers.add here.
+	p := h.payload("containers.list", nil)
+	p = []byte(strings.Replace(string(p), `"op":"containers.list"`, `"op":"containers.list","Op":"signers.list"`, 1))
+	expectErr(t, h.call(h.webauthn(h.admin, p, assertOpts{})), protocol.CodeBadRequest, "unexpected field")
+	dup := []byte(strings.Replace(string(h.payload("signers.list", nil)), `"op":"signers.list"`, `"op":"signers.list","op":"signers.list"`, 1))
+	expectErr(t, h.call(h.webauthn(h.admin, dup, assertOpts{})), protocol.CodeBadRequest, "duplicate")
+}

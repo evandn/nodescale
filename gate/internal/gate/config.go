@@ -46,7 +46,7 @@ type Policy struct {
 	// AllowSessionScopes limits which scopes a session certificate may carry.
 	// Defaults to ["read", "operate"]. Set to ["read"] to require a fresh
 	// passkey touch for every state-changing action.
-	AllowSessionScopes []string `json:"allowSessionScopes,omitempty"`
+	AllowSessionScopes []string `json:"allowSessionScopes,omitzero"`
 
 	Containers ContainerPolicy `json:"containers"`
 }
@@ -58,8 +58,8 @@ type ContainerPolicy struct {
 	AllowHostNamespaces bool     `json:"allowHostNamespaces,omitempty"` // network/pid/ipc/uts/userns=host
 	AllowDevices        bool     `json:"allowDevices,omitempty"`
 	AllowPublishedPorts bool     `json:"allowPublishedPorts,omitempty"`
-	AllowedCapabilities []string `json:"allowedCapabilities,omitempty"`
-	BindMountPrefixes   []string `json:"bindMountPrefixes,omitempty"`
+	AllowedCapabilities []string `json:"allowedCapabilities,omitzero"`
+	BindMountPrefixes   []string `json:"bindMountPrefixes,omitzero"`
 }
 
 // DefaultCapabilities are capabilities that do not by themselves enable

@@ -50,6 +50,8 @@ type relay struct {
 	secret  string
 	log     *slog.Logger
 	devGate string
+	// dial overrides the tailnet dialer (tests).
+	dial func(ctx context.Context, network, addr string) (net.Conn, error)
 
 	mu       sync.Mutex
 	ts       *tsnet.Server
@@ -255,20 +257,31 @@ func (r *relay) rpc(w http.ResponseWriter, req *http.Request) {
 
 func (r *relay) client(ctx context.Context, host string) (*ssh.Client, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if c, ok := r.clients[host]; ok {
+		r.mu.Unlock()
 		return c, nil
 	}
-	if r.ts == nil || r.state != "up" {
+	dial, up := r.dial, r.state == "up"
+	if dial == nil && r.ts != nil {
+		dial = r.ts.Dial
+	}
+	r.mu.Unlock()
+	if dial == nil || !up {
 		return nil, errors.New("relay is not connected to the tailnet")
 	}
+
+	// Dial and handshake without holding the lock, under a hard deadline: a
+	// peer that accepts TCP and never answers must not stall other servers.
 	dctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	addr := net.JoinHostPort(host, "22")
-	conn, err := r.ts.Dial(dctx, "tcp", addr)
+	conn, err := dial(dctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
+	deadline, _ := dctx.Deadline()
+	_ = conn.SetDeadline(deadline)
+	stop := context.AfterFunc(dctx, func() { conn.Close() })
 	// Tailscale SSH authenticates the connection by tailnet identity ("none"
 	// auth) and the transport is already end-to-end encrypted by WireGuard.
 	// Host keys are not pinned because nothing sent over this channel is
@@ -279,12 +292,25 @@ func (r *relay) client(ctx context.Context, host string) (*ssh.Client, error) {
 		Timeout:         20 * time.Second,
 	}
 	sc, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
-	if err != nil {
+	if !stop() || err != nil {
 		conn.Close()
+		if err == nil {
+			err = dctx.Err()
+		}
 		return nil, fmt.Errorf("ssh %s: %w", addr, err)
 	}
+	_ = conn.SetDeadline(time.Time{})
 	c := ssh.NewClient(sc, chans, reqs)
+
+	r.mu.Lock()
+	if existing, ok := r.clients[host]; ok {
+		// Another request connected concurrently; keep one connection.
+		r.mu.Unlock()
+		c.Close()
+		return existing, nil
+	}
 	r.clients[host] = c
+	r.mu.Unlock()
 	go func() {
 		c.Wait()
 		r.mu.Lock()

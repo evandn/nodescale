@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -79,5 +83,50 @@ func TestDevGatePipe(t *testing.T) {
 	}
 	if w := do(h, "POST", "/v1/rpc", "{\"host\":\"100.64.0.1\",\"request\":{\"payload\":\n\"abc\"}}", true); w.Code != http.StatusBadRequest {
 		t.Fatalf("multi-line request must be rejected, got %d", w.Code)
+	}
+}
+
+func TestSilentPeerDoesNotWedgeRelay(t *testing.T) {
+	// A peer that accepts TCP but never speaks SSH.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+		}
+	}()
+	r := &relay{secret: testSecret, log: slog.New(slog.NewTextHandler(io.Discard, nil)), state: "up", clients: map[string]*ssh.Client{}}
+	r.dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, ln.Addr().String())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := r.client(ctx, "100.64.0.1"); done <- err }()
+
+	// While the handshake hangs, the relay lock must be free.
+	time.Sleep(50 * time.Millisecond)
+	locked := make(chan struct{})
+	go func() { r.mu.Lock(); r.mu.Unlock(); close(locked) }()
+	select {
+	case <-locked:
+	case <-time.After(time.Second):
+		t.Fatal("relay mutex held during SSH handshake")
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a handshake error")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("handshake did not honour the deadline")
 	}
 }
